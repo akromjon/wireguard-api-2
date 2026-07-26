@@ -10,6 +10,10 @@ fail() {
 	exit 1
 }
 
+if grep -q 'while (( ${RANDOM_AWG_H1}' "${SCRIPT_DIR}/amneziawg-install.sh"; then
+	fail "legacy arithmetic comparison must not process H ranges"
+fi
+
 h_spec_bounds "5" || fail "single H value should be valid"
 h_spec_bounds "5-10" || fail "H range should be valid"
 if h_spec_bounds "4"; then

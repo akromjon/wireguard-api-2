@@ -40,7 +40,8 @@ The installer asks for the AmneziaWG parameters and writes the same values to
 the server and generated client configs:
 
 - `Jc`, `Jmin`, `Jmax`, `S1`, and `S2` retain the existing AmneziaWG behavior.
-- `S3` and `S4` are AWG2 padding values. They are always persisted, including
+- `S3` and `S4` are AWG2 padding values. The documented ranges are `0–64`
+  bytes for S3 and `0–32` bytes for S4. They are always persisted, including
   `0`, which disables that padding dimension.
 - `H1`–`H4` accept a single value or an inclusive `min-max` range. The
   installer rejects invalid, out-of-bounds, and overlapping ranges.

@@ -374,11 +374,11 @@ function readH1AndH2AndH3AndH4() {
 function readS3AndS4() {
 	SERVER_AWG_S3=0
 	SERVER_AWG_S4=0
-	until [[ ${SERVER_AWG_S3} =~ ^[0-9]+$ ]] && (( SERVER_AWG_S3 <= 65535 )); do
-		read -rp "Server AmneziaWG S3 padding [0-65535, 0 disables]: " -e -i 0 SERVER_AWG_S3
+	until [[ ${SERVER_AWG_S3} =~ ^[0-9]+$ ]] && (( SERVER_AWG_S3 <= 64 )); do
+		read -rp "Server AmneziaWG S3 padding [0-64, 0 disables]: " -e -i 0 SERVER_AWG_S3
 	done
-	until [[ ${SERVER_AWG_S4} =~ ^[0-9]+$ ]] && (( SERVER_AWG_S4 <= 65535 )); do
-		read -rp "Server AmneziaWG S4 padding [0-65535, 0 disables]: " -e -i 0 SERVER_AWG_S4
+	until [[ ${SERVER_AWG_S4} =~ ^[0-9]+$ ]] && (( SERVER_AWG_S4 <= 32 )); do
+		read -rp "Server AmneziaWG S4 padding [0-32, 0 disables]: " -e -i 0 SERVER_AWG_S4
 	done
 }
 
@@ -476,9 +476,6 @@ function installQuestions() {
 
 	# H1 && H2 && H3 && H4
 	generateH1AndH2AndH3AndH4
-	while (( ${RANDOM_AWG_H1} == ${RANDOM_AWG_H2} )) || (( ${RANDOM_AWG_H1} == ${RANDOM_AWG_H3} )) || (( ${RANDOM_AWG_H1} == ${RANDOM_AWG_H4} )) || (( ${RANDOM_AWG_H2} == ${RANDOM_AWG_H3} )) || (( ${RANDOM_AWG_H2} == ${RANDOM_AWG_H4} )) || (( ${RANDOM_AWG_H3} == ${RANDOM_AWG_H4} )); do
-		generateH1AndH2AndH3AndH4
-	done
 	readH1AndH2AndH3AndH4
 	while h_specs_overlap "${SERVER_AWG_H1}" "${SERVER_AWG_H2}" "${SERVER_AWG_H3}" "${SERVER_AWG_H4}"; do
 		echo "AmneziaWG requires H1, H2, H3, and H4 ranges not to overlap"

@@ -578,7 +578,8 @@ func TestLoadAWG2ParamsRejectsMalformedValues(t *testing.T) {
 		overrides  string
 		wantErrors []string
 	}{
-		{name: "padding exceeds uint16", overrides: "SERVER_AWG_S3=65536", wantErrors: []string{"S3", "unsigned 16-bit"}},
+		{name: "S3 exceeds documented range", overrides: "SERVER_AWG_S3=65", wantErrors: []string{"S3", "0-64"}},
+		{name: "S4 exceeds documented range", overrides: "SERVER_AWG_S4=33", wantErrors: []string{"S4", "0-32"}},
 		{name: "H below minimum", overrides: "SERVER_AWG_H1=4", wantErrors: []string{"H1", "bounds"}},
 		{name: "H ranges overlap", overrides: "SERVER_AWG_H1=100-300", wantErrors: []string{"H1 and H2", "overlap"}},
 		{name: "H range has too many bounds", overrides: "SERVER_AWG_H1=100-200-300", wantErrors: []string{"H1", "number or min-max"}},

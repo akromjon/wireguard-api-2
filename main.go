@@ -443,12 +443,17 @@ func parseAWGHSpec(spec string) (int64, int64, error) {
 }
 
 func validateAWG2Params(params WGParams) error {
-	for name, value := range map[string]string{
-		"S3": params.ServerAWGS3,
-		"S4": params.ServerAWGS4,
+	for _, padding := range []struct {
+		name  string
+		value string
+		max   uint64
+	}{
+		{name: "S3", value: params.ServerAWGS3, max: 64},
+		{name: "S4", value: params.ServerAWGS4, max: 32},
 	} {
-		if _, err := strconv.ParseUint(value, 10, 16); err != nil {
-			return fmt.Errorf("invalid AWG2 %s value %q: must be an unsigned 16-bit integer", name, value)
+		parsed, err := strconv.ParseUint(padding.value, 10, 16)
+		if err != nil || parsed > padding.max {
+			return fmt.Errorf("invalid AWG2 %s value %q: must be in range 0-%d", padding.name, padding.value, padding.max)
 		}
 	}
 
