@@ -1,0 +1,415 @@
+openapi: 3.0.3
+info:
+  title: WireGuard API V2
+  description: API for managing WireGuard and AmneziaWG 2.0 VPN users and service. The HTTP contract remains compatible with v1.
+  version: 2.0.0
+  contact:
+    name: GitHub Repository
+    url: https://github.com/akromjon/wireguard-api-2
+servers:
+  - url: http://localhost:8080
+    description: Local development server
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: key
+  
+  schemas:
+    APIResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          description: Indicates if the operation was successful
+        message:
+          type: string
+          description: Human-readable message about the operation
+        data:
+          type: object
+          description: Optional data returned from the operation
+    
+    Client:
+      type: object
+      properties:
+        name:
+          type: string
+          description: Client name
+        ipv4:
+          type: string
+          description: IPv4 address assigned to the client
+        ipv6:
+          type: string
+          description: IPv6 address assigned to the client
+        config:
+          type: string
+          description: "WireGuard or AmneziaWG 2.0 configuration file content for the client. AWG2 configs include S3, S4, H ranges, optional I1-I5, and the comment `# CHOP-AWG-PROFILE: awg2`."
+    
+    AddUserRequest:
+      type: object
+      required:
+        - name
+      properties:
+        name:
+          type: string
+          description: Client name (alphanumeric, underscore, dash only; max 15 chars)
+          example: client1
+        ipv4:
+          type: string
+          description: IPv4 address to assign (optional, auto-assigned if not provided)
+          example: 10.8.0.2
+        ipv6:
+          type: string
+          description: IPv6 address to assign (optional, auto-assigned if not provided)
+          example: fd42:42:42::2
+    
+    DeleteUserRequest:
+      type: object
+      required:
+        - name
+      properties:
+        name:
+          type: string
+          description: Client name to delete
+          example: client1
+
+security:
+  - ApiKeyAuth: []
+
+paths:
+  /api/users:
+    get:
+      summary: List all WireGuard clients
+      description: Returns a list of all configured WireGuard clients
+      operationId: listUsers
+      responses:
+        '200':
+          description: List of clients
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Client'
+        '401':
+          description: Unauthorized - Missing or invalid API token
+  
+  /api/users/add:
+    post:
+      summary: Add a new WireGuard client
+      description: Creates a new WireGuard client configuration
+      operationId: addUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddUserRequest'
+      responses:
+        '200':
+          description: Client created successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  message:
+                    type: string
+                    example: Client added successfully
+                  data:
+                    $ref: '#/components/schemas/Client'
+        '400':
+          description: Invalid request
+        '401':
+          description: Unauthorized - Missing or invalid API token
+        '409':
+          description: Client already exists
+  
+  /api/users/add-bulk:
+    post:
+      summary: Add multiple WireGuard clients in one request
+      description: >
+        Creates up to 500 clients under a single config lock and applies the
+        configuration once at the end. Per-name failures (e.g. name already
+        exists) do not abort the batch; the outcome of every requested name is
+        returned in data.results. Invalid or duplicate names reject the whole
+        request before anything is created.
+      operationId: addUsersBulk
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - names
+              properties:
+                names:
+                  type: array
+                  minItems: 1
+                  maxItems: 500
+                  items:
+                    type: string
+                    pattern: '^[a-zA-Z0-9_-]{1,15}$'
+      responses:
+        '200':
+          description: At least one client was created and the configuration was applied under the same lock hold; individual names may still have failed — check data.results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  message:
+                    type: string
+                    example: Created 500 of 500 clients
+                  data:
+                    type: object
+                    properties:
+                      created:
+                        type: integer
+                      failed:
+                        type: integer
+                      results:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            name:
+                              type: string
+                            success:
+                              type: boolean
+                            message:
+                              type: string
+                            ipv4:
+                              type: string
+                            ipv6:
+                              type: string
+        '400':
+          description: Invalid request (no names, too many names, invalid or duplicate name)
+        '404':
+          description: Missing or invalid API token (the auth middleware masks failures as 404), or the endpoint does not exist on an older binary — callers cannot distinguish the two by status
+        '500':
+          description: Applying the configuration failed (data reports what was created), or no clients could be created at all (created=0)
+
+  /api/users/delete:
+    post:
+      summary: Delete a WireGuard client
+      description: Removes a WireGuard client configuration
+      operationId: deleteUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeleteUserRequest'
+      responses:
+        '200':
+          description: Client deleted successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  message:
+                    type: string
+                    example: Client deleted successfully
+        '400':
+          description: Invalid request
+        '401':
+          description: Unauthorized
+        '404':
+          description: Client not found
+
+  /api/users/delete-all:
+    post:
+      summary: Delete all WireGuard clients
+      description: Removes all WireGuard client configurations
+      operationId: deleteAllUsers
+      responses:
+        '200':
+          description: All clients deleted successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  message:
+                    type: string
+                    example: Successfully deleted all clients
+                  data:
+                    type: object
+                    properties:
+                      deleted_count:
+                        type: integer
+                        example: 5
+                      clients:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/Client'
+                      files_deleted:
+                        type: array
+                        items:
+                          type: string
+                          example: "client1.conf"
+        '401':
+          description: Unauthorized - Missing or invalid API token
+        '500':
+          description: Failed to delete all clients
+
+  /api/wireguard/status:
+    get:
+      summary: Get WireGuard service status
+      description: Returns detailed status information about the WireGuard service
+      operationId: getWireGuardStatus
+      responses:
+        '200':
+          description: WireGuard status information
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  data:
+                    type: object
+                    properties:
+                      interface:
+                        type: string
+                        example: wg0
+                      running:
+                        type: boolean
+                        example: true
+                      peers:
+                        type: array
+                        items:
+                          type: object
+                      server_info:
+                        type: object
+                      system:
+                        type: object
+        '401':
+          description: Unauthorized - Missing or invalid API token
+
+  /api/health:
+    get:
+      summary: Get lightweight WireGuard health
+      description: Returns only whether the WireGuard/AmneziaWG interface is running.
+      operationId: getWireGuardHealth
+      responses:
+        '200':
+          description: Lightweight WireGuard health state
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - success
+                  - data
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  data:
+                    type: object
+                    required:
+                      - running
+                    properties:
+                      running:
+                        type: boolean
+                        example: true
+        '404':
+          description: Unauthorized - Missing or invalid API token
+
+  /api/wireguard/start:
+    post:
+      summary: Start the WireGuard service
+      description: Starts the WireGuard service using systemctl
+      operationId: startWireGuard
+      responses:
+        '200':
+          description: Service started successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  message:
+                    type: string
+                    example: WireGuard service started successfully
+        '401':
+          description: Unauthorized - Missing or invalid API token
+        '500':
+          description: Failed to start the service
+
+  /api/wireguard/stop:
+    post:
+      summary: Stop the WireGuard service
+      description: Stops the WireGuard service using systemctl
+      operationId: stopWireGuard
+      responses:
+        '200':
+          description: Service stopped successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  message:
+                    type: string
+                    example: WireGuard service stopped successfully
+        '401':
+          description: Unauthorized - Missing or invalid API token
+        '500':
+          description: Failed to stop the service
+
+  /api/wireguard/restart:
+    post:
+      summary: Restart the WireGuard service
+      description: Restarts the WireGuard service using systemctl
+      operationId: restartWireGuard
+      responses:
+        '200':
+          description: Service restarted successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  message:
+                    type: string
+                    example: WireGuard service restarted successfully
+        '401':
+          description: Unauthorized - Missing or invalid API token
+        '500':
+          description: Failed to restart the service

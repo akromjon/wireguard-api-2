@@ -1,0 +1,15 @@
+[Unit]
+Description=Wireguard API V2 Service (AmneziaWG 2.0)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/etc/wireguard-api
+ExecStart=/usr/local/bin/wireguard
+EnvironmentFile=/etc/wireguard-api/.env
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target 
