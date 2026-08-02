@@ -10,9 +10,192 @@ GREEN='\033[0;32m'
 NC='\033[0m'
 
 AMNEZIAWG_DIR="/etc/amnezia/amneziawg"
+AWG_CLIENTS_DIR="/home/wireguard/users"
 AWG_H_MIN=5
 AWG_H_MAX=2147483647
 AWG_H_RANGE_WIDTH=1000
+
+EXISTING_AWG_INTERFACES=()
+EXISTING_AWG_PORTS=()
+EXISTING_API_PORTS=()
+EXISTING_AWG_SUMMARIES=()
+LEGACY_AWG_DETECTED=0
+AWG2_DETECTED=0
+
+function array_contains() {
+	local expected=$1
+	shift
+	local item
+	for item in "$@"; do
+		[[ ${item} == "${expected}" ]] && return 0
+	done
+	return 1
+}
+
+function add_existing_interface() {
+	local interface=$1
+	[[ -n ${interface} ]] || return
+	if ((${#EXISTING_AWG_INTERFACES[@]} > 0)) && array_contains "${interface}" "${EXISTING_AWG_INTERFACES[@]}"; then
+		return
+	fi
+	EXISTING_AWG_INTERFACES+=("${interface}")
+}
+
+function add_existing_awg_port() {
+	local port=$1
+	[[ ${port} =~ ^[0-9]+$ ]] || return
+	if ((${#EXISTING_AWG_PORTS[@]} > 0)) && array_contains "${port}" "${EXISTING_AWG_PORTS[@]}"; then
+		return
+	fi
+	EXISTING_AWG_PORTS+=("${port}")
+}
+
+function add_existing_api_port() {
+	local port=$1
+	[[ ${port} =~ ^[0-9]+$ ]] || return
+	if ((${#EXISTING_API_PORTS[@]} > 0)) && array_contains "${port}" "${EXISTING_API_PORTS[@]}"; then
+		return
+	fi
+	EXISTING_API_PORTS+=("${port}")
+}
+
+function detect_existing_awg_installations() {
+	local config interface port profile env_file
+	local -a config_files env_files live_interfaces
+
+	EXISTING_AWG_INTERFACES=()
+	EXISTING_AWG_PORTS=()
+	EXISTING_API_PORTS=()
+	EXISTING_AWG_SUMMARIES=()
+	LEGACY_AWG_DETECTED=0
+	AWG2_DETECTED=0
+
+	config_files=("${AMNEZIAWG_DIR}"/*.conf)
+	for config in "${config_files[@]}"; do
+		[[ -f ${config} ]] || continue
+		interface=$(basename "${config}" .conf)
+		port=$(awk -F= '/^[[:space:]]*ListenPort[[:space:]]*=/ {gsub(/[[:space:]]/, "", $2); print $2; exit}' "${config}")
+		profile=legacy
+		if grep -Eq '^# CHOP-AWG-PROFILE: awg2$|^[[:space:]]*S3[[:space:]]*=' "${config}"; then
+			profile=awg2
+			AWG2_DETECTED=1
+		else
+			LEGACY_AWG_DETECTED=1
+		fi
+		add_existing_interface "${interface}"
+		add_existing_awg_port "${port}"
+		EXISTING_AWG_SUMMARIES+=("${interface}|${profile}|${port:-unknown}|${config}")
+	done
+
+	if command -v awg >/dev/null 2>&1; then
+		read -r -a live_interfaces <<<"$(awg show interfaces 2>/dev/null || true)"
+		for interface in "${live_interfaces[@]}"; do
+			[[ -n ${interface} ]] || continue
+			add_existing_interface "${interface}"
+			port=$(awg show "${interface}" listen-port 2>/dev/null || true)
+			add_existing_awg_port "${port}"
+		done
+	fi
+
+	if [[ -f ${AMNEZIAWG_DIR}/params ]] && ((${#EXISTING_AWG_INTERFACES[@]} == 0)); then
+		LEGACY_AWG_DETECTED=1
+		interface=$(awk -F= '/^SERVER_AWG_NIC=/ {gsub(/["[:space:]]|\047/, "", $2); print $2; exit}' "${AMNEZIAWG_DIR}/params")
+		port=$(awk -F= '/^SERVER_PORT=/ {gsub(/["[:space:]]|\047/, "", $2); print $2; exit}' "${AMNEZIAWG_DIR}/params")
+		add_existing_interface "${interface:-awg0}"
+		add_existing_awg_port "${port}"
+		EXISTING_AWG_SUMMARIES+=("${interface:-awg0}|legacy|${port:-unknown}|${AMNEZIAWG_DIR}/params")
+	fi
+
+	env_files=(/etc/wireguard-api*/.env)
+	for env_file in "${env_files[@]}"; do
+		[[ -f ${env_file} ]] || continue
+		port=$(awk -F= '/^API_PORT=/ {gsub(/["[:space:]]|\047/, "", $2); print $2; exit}' "${env_file}")
+		add_existing_api_port "${port}"
+	done
+}
+
+function interface_in_use() {
+	local interface=$1
+	if ((${#EXISTING_AWG_INTERFACES[@]} > 0)) && array_contains "${interface}" "${EXISTING_AWG_INTERFACES[@]}"; then
+		return 0
+	fi
+	[[ -e ${AMNEZIAWG_DIR}/${interface}.conf ]] && return 0
+	if command -v ip >/dev/null 2>&1 && ip link show "${interface}" >/dev/null 2>&1; then
+		return 0
+	fi
+	return 1
+}
+
+function udp_port_in_use() {
+	local port=$1
+	if ((${#EXISTING_AWG_PORTS[@]} > 0)) && array_contains "${port}" "${EXISTING_AWG_PORTS[@]}"; then
+		return 0
+	fi
+	if command -v ss >/dev/null 2>&1 && ss -H -lun 2>/dev/null | grep -Eq ":${port}[[:space:]]"; then
+		return 0
+	fi
+	return 1
+}
+
+function tcp_port_in_use() {
+	local port=$1
+	if ((${#EXISTING_API_PORTS[@]} > 0)) && array_contains "${port}" "${EXISTING_API_PORTS[@]}"; then
+		return 0
+	fi
+	if command -v ss >/dev/null 2>&1 && ss -H -ltn 2>/dev/null | grep -Eq ":${port}[[:space:]]"; then
+		return 0
+	fi
+	return 1
+}
+
+function suggest_awg_interface() {
+	local index candidate
+	for ((index = 0; index < 100; index++)); do
+		candidate="awg${index}"
+		if ! interface_in_use "${candidate}"; then
+			echo "${candidate}"
+			return 0
+		fi
+	done
+	return 1
+}
+
+function suggest_udp_port() {
+	local port attempts
+	for ((attempts = 0; attempts < 200; attempts++)); do
+		port=$(shuf -i2000-9999 -n1)
+		if ! udp_port_in_use "${port}"; then
+			echo "${port}"
+			return 0
+		fi
+	done
+	return 1
+}
+
+function suggest_api_port() {
+	local port
+	for ((port = 8080; port <= 8199; port++)); do
+		if ! tcp_port_in_use "${port}"; then
+			echo "${port}"
+			return 0
+		fi
+	done
+	return 1
+}
+
+function print_existing_awg_summary() {
+	local summary interface profile port config
+	if ((${#EXISTING_AWG_SUMMARIES[@]} == 0)); then
+		return
+	fi
+
+	echo -e "${YELLOW}Detected existing AmneziaWG installation(s):${NC}"
+	for summary in "${EXISTING_AWG_SUMMARIES[@]}"; do
+		IFS='|' read -r interface profile port config <<<"${summary}"
+		printf '  - %s: profile=%s, UDP port=%s, source=%s\n' "${interface}" "${profile}" "${port}" "${config}"
+	done
+	echo "The existing VPN interfaces, listener ports, configs, and peers will not be modified before confirmation."
+}
 
 # AWG2 accepts a single H value or an inclusive range. Keep the four H
 # ranges valid and non-overlapping so a packet cannot match multiple H rules.
@@ -112,15 +295,14 @@ function getHomeDirForClient() {
 		exit 1
 	fi
 
-	# Create the wireguard users directory if it doesn't exist
-	if [ ! -d "/home/wireguard/users" ]; then
-		mkdir -p "/home/wireguard/users"
+	# Co-located interfaces must not share generated client files.
+	if [ ! -d "${AWG_CLIENTS_DIR}" ]; then
+		mkdir -p "${AWG_CLIENTS_DIR}"
 		chmod 700 "/home/wireguard"
-		chmod 700 "/home/wireguard/users"
+		chmod 700 "${AWG_CLIENTS_DIR}"
 	fi
 
-	# Always use /home/wireguard/users for client configurations
-	HOME_DIR="/home/wireguard/users"
+	HOME_DIR="${AWG_CLIENTS_DIR}"
 
 	echo "$HOME_DIR"
 }
@@ -391,12 +573,125 @@ function readIParams() {
 	read -rp "AmneziaWG I5 (optional): " SERVER_AWG_I5
 }
 
+function ipv4_tunnel_in_use() {
+	local address=$1
+	local prefix
+	prefix=$(awk -F. '{print $1 "." $2 "."}' <<<"${address}")
+	grep -Ehs '^[[:space:]]*Address[[:space:]]*=' "${AMNEZIAWG_DIR}"/*.conf 2>/dev/null | grep -Fq "${prefix}"
+}
+
+function ipv6_tunnel_in_use() {
+	local address=$1
+	local prefix=${address%::*}
+	grep -Ehis '^[[:space:]]*Address[[:space:]]*=' "${AMNEZIAWG_DIR}"/*.conf 2>/dev/null | grep -Fiq "${prefix}:"
+}
+
+function configure_installation_layout() {
+	local interface_index=0 ipv4_octet=66 ipv6_segment=42 summary interface profile port config
+	if [[ ${SERVER_AWG_NIC} =~ ^awg([0-9]+)$ ]]; then
+		interface_index=${BASH_REMATCH[1]}
+	fi
+	ipv4_octet=$((66 + interface_index))
+	ipv6_segment=$((42 + interface_index))
+	((ipv4_octet <= 254)) || ipv4_octet=254
+
+	DEFAULT_AWG_IPV4="10.${ipv4_octet}.66.1"
+	DEFAULT_AWG_IPV6="fd42:42:${ipv6_segment}::1"
+
+	if ((${#EXISTING_AWG_INTERFACES[@]} > 0)); then
+		SERVER_PARAMS_FILE="${AMNEZIAWG_DIR}/params.${SERVER_AWG_NIC}"
+		AWG_CLIENTS_DIR="/home/wireguard/users-${SERVER_AWG_NIC}"
+		API_CONFIG_DIR="/etc/wireguard-api"
+		API_SERVICE_NAME="wireguard.service"
+		API_BINARY_PATH="/usr/local/bin/wireguard"
+		LEGACY_WG_PARAMS_FILE="${AMNEZIAWG_DIR}/params"
+		for summary in "${EXISTING_AWG_SUMMARIES[@]}"; do
+			IFS='|' read -r interface profile port config <<<"${summary}"
+			if [[ ${profile} == legacy ]]; then
+				LEGACY_WG_CONFIG_FILE="${config}"
+				LEGACY_SERVER_PORT="${port}"
+				break
+			fi
+		done
+		LEGACY_WG_CONFIG_FILE=${LEGACY_WG_CONFIG_FILE:-${AMNEZIAWG_DIR}/awg0.conf}
+		if [[ -f ${API_CONFIG_DIR}/.env ]]; then
+			API_PORT=$(awk -F= '/^API_PORT=/ {gsub(/["[:space:]]|\047/, "", $2); print $2; exit}' "${API_CONFIG_DIR}/.env")
+		fi
+		API_PORT=${API_PORT:-8080}
+		REUSE_EXISTING_API=1
+	else
+		SERVER_PARAMS_FILE="${AMNEZIAWG_DIR}/params"
+		AWG_CLIENTS_DIR="/home/wireguard/users"
+		API_CONFIG_DIR="/etc/wireguard-api"
+		API_SERVICE_NAME="wireguard.service"
+		API_BINARY_PATH="/usr/local/bin/wireguard"
+		REUSE_EXISTING_API=0
+	fi
+}
+
+function validate_installation_choices() {
+	local config_path="${AMNEZIAWG_DIR}/${SERVER_AWG_NIC}.conf"
+	if interface_in_use "${SERVER_AWG_NIC}" || [[ -e ${config_path} ]]; then
+		echo -e "${RED}Interface ${SERVER_AWG_NIC} or ${config_path} already exists.${NC}" >&2
+		return 1
+	fi
+	if udp_port_in_use "${SERVER_PORT}"; then
+		echo -e "${RED}UDP port ${SERVER_PORT} is already assigned or listening.${NC}" >&2
+		return 1
+	fi
+	if [[ ${REUSE_EXISTING_API} != 1 ]] && tcp_port_in_use "${API_PORT}"; then
+		echo -e "${RED}TCP API port ${API_PORT} is already assigned or listening.${NC}" >&2
+		return 1
+	fi
+	if ipv4_tunnel_in_use "${SERVER_AWG_IPV4}"; then
+		echo -e "${RED}IPv4 tunnel network for ${SERVER_AWG_IPV4}/16 overlaps an existing AmneziaWG config.${NC}" >&2
+		return 1
+	fi
+	if ipv6_tunnel_in_use "${SERVER_AWG_IPV6}"; then
+		echo -e "${RED}IPv6 tunnel network for ${SERVER_AWG_IPV6}/64 overlaps an existing AmneziaWG config.${NC}" >&2
+		return 1
+	fi
+	if [[ -e ${SERVER_PARAMS_FILE} ]]; then
+		echo -e "${RED}Params file already exists: ${SERVER_PARAMS_FILE}${NC}" >&2
+		return 1
+	fi
+	if [[ ${REUSE_EXISTING_API} != 1 && -e /etc/systemd/system/${API_SERVICE_NAME} ]]; then
+		echo -e "${RED}API service already exists: ${API_SERVICE_NAME}${NC}" >&2
+		return 1
+	fi
+	if [[ ${REUSE_EXISTING_API} == 1 && ! -f ${API_CONFIG_DIR}/.env ]]; then
+		echo -e "${RED}Existing API environment was not found at ${API_CONFIG_DIR}/.env; refusing to replace the API service blindly.${NC}" >&2
+		return 1
+	fi
+	if [[ ${REUSE_EXISTING_API} == 1 ]]; then
+		local existing_api_token
+		existing_api_token=$(awk -F= '/^API_TOKEN=/ {print substr($0, index($0, "=") + 1); exit}' "${API_CONFIG_DIR}/.env")
+		if [[ -z ${existing_api_token} || ${existing_api_token} == replace-this-with-your-secure-random-token ]]; then
+			echo -e "${RED}The existing API token is missing or a placeholder; refusing to rotate it during coexistence setup.${NC}" >&2
+			return 1
+		fi
+		if [[ ! -f ${LEGACY_WG_CONFIG_FILE} || ! -f ${LEGACY_WG_PARAMS_FILE} ]]; then
+			echo -e "${RED}Legacy API context files are incomplete: ${LEGACY_WG_CONFIG_FILE}, ${LEGACY_WG_PARAMS_FILE}.${NC}" >&2
+			return 1
+		fi
+	fi
+	return 0
+}
+
 function installQuestions() {
 	echo "AmneziaWG server installer (https://github.com/varckin/amneziawg-install)"
 	echo ""
 	echo "I need to ask you a few questions before starting the setup."
 	echo "You can keep the default options and just press enter if you are ok with them."
 	echo ""
+	print_existing_awg_summary
+	if ((${#EXISTING_AWG_SUMMARIES[@]} > 0)); then
+		echo "AWG2 will be installed alongside the detected legacy service."
+		echo "A different interface, tunnel network, and UDP listener are required."
+		echo "The existing management API will remain on its current TCP port and will be upgraded to generate AWG2 configs."
+		echo "Changing only the port does not make a legacy profile compatible with AWG2."
+		echo ""
+	fi
 
 	# Detect public IPv4 or IPv6 address and pre-fill for the user
 	SERVER_PUB_IP=$(ip -4 addr | sed -ne 's|^.* inet \([^/]*\)/.* scope global.*$|\1|p' | awk '{print $1}' | head -1)
@@ -412,24 +707,52 @@ function installQuestions() {
 		read -rp "Public interface: " -e -i "${SERVER_NIC}" SERVER_PUB_NIC
 	done
 
-	until [[ ${SERVER_AWG_NIC} =~ ^[a-zA-Z0-9_]+$ && ${#SERVER_AWG_NIC} -lt 16 ]]; do
-		read -rp "AmneziaWG interface name: " -e -i awg0 SERVER_AWG_NIC
+	DEFAULT_AWG_NIC=$(suggest_awg_interface)
+	until [[ ${SERVER_AWG_NIC} =~ ^[a-zA-Z0-9_]+$ && ${#SERVER_AWG_NIC} -lt 16 ]] && ! interface_in_use "${SERVER_AWG_NIC}"; do
+		read -rp "New AWG2 interface name: " -e -i "${DEFAULT_AWG_NIC}" SERVER_AWG_NIC
+		if interface_in_use "${SERVER_AWG_NIC}"; then
+			echo "Interface ${SERVER_AWG_NIC} is already configured; choose another interface."
+		fi
 	done
+	configure_installation_layout
 
 	until [[ ${SERVER_AWG_IPV4} =~ ^([0-9]{1,3}\.){3} ]]; do
-		read -rp "Server AmneziaWG IPv4: " -e -i 10.66.66.1 SERVER_AWG_IPV4
+		read -rp "New AWG2 tunnel IPv4: " -e -i "${DEFAULT_AWG_IPV4}" SERVER_AWG_IPV4
+		if ipv4_tunnel_in_use "${SERVER_AWG_IPV4}"; then
+			echo "That /16 tunnel network overlaps an existing AmneziaWG config."
+			SERVER_AWG_IPV4=""
+		fi
 	done
 
 	until [[ ${SERVER_AWG_IPV6} =~ ^([a-f0-9]{1,4}:){3,4}: ]]; do
-		read -rp "Server AmneziaWG IPv6: " -e -i fd42:42:42::1 SERVER_AWG_IPV6
+		read -rp "New AWG2 tunnel IPv6: " -e -i "${DEFAULT_AWG_IPV6}" SERVER_AWG_IPV6
+		if ipv6_tunnel_in_use "${SERVER_AWG_IPV6}"; then
+			echo "That /64 tunnel network overlaps an existing AmneziaWG config."
+			SERVER_AWG_IPV6=""
+		fi
 	done
 
 	# Amnezia's deployment guidance recommends ports up to 9999 because some
 	# networks block higher UDP ports. Keep that as the installer default.
-	RANDOM_PORT=$(shuf -i2000-9999 -n1)
-	until [[ ${SERVER_PORT} =~ ^[0-9]+$ ]] && [ "${SERVER_PORT}" -ge 1 ] && [ "${SERVER_PORT}" -le 9999 ]; do
-		read -rp "Server AmneziaWG port [1-9999]: " -e -i "${RANDOM_PORT}" SERVER_PORT
+	RANDOM_PORT=$(suggest_udp_port)
+	until [[ ${SERVER_PORT} =~ ^[0-9]+$ ]] && [ "${SERVER_PORT}" -ge 1 ] && [ "${SERVER_PORT}" -le 9999 ] && ! udp_port_in_use "${SERVER_PORT}"; do
+		read -rp "New AWG2 UDP port [1-9999]: " -e -i "${RANDOM_PORT}" SERVER_PORT
+		if [[ ${SERVER_PORT} =~ ^[0-9]+$ ]] && udp_port_in_use "${SERVER_PORT}"; then
+			echo "UDP port ${SERVER_PORT} is used by an existing interface or process. It cannot be reused."
+		fi
 	done
+
+	if [[ ${REUSE_EXISTING_API} == 1 ]]; then
+		echo "Reusing the existing node management API on TCP ${API_PORT}."
+	else
+		DEFAULT_API_PORT=$(suggest_api_port)
+		until [[ ${API_PORT} =~ ^[0-9]+$ ]] && (( API_PORT >= 1 && API_PORT <= 65535 )) && ! tcp_port_in_use "${API_PORT}"; do
+			read -rp "AWG2 node API TCP port [1-65535]: " -e -i "${DEFAULT_API_PORT}" API_PORT
+			if [[ ${API_PORT} =~ ^[0-9]+$ ]] && tcp_port_in_use "${API_PORT}"; then
+				echo "TCP port ${API_PORT} is already assigned or listening. Choose another API port."
+			fi
+		done
+	fi
 
 	# Adguard DNS by default
 	until [[ ${CLIENT_DNS_1} =~ ^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$ ]]; do
@@ -488,9 +811,28 @@ function installQuestions() {
 	readIParams
 
 	echo ""
-	echo "Okay, that was all I needed. We are ready to setup your AmneziaWG server now."
-	echo "Client configurations will be managed by the WireGuard API after installation."
-	read -n1 -r -p "Press any key to continue..."
+	echo "AWG2 installation summary:"
+	echo "  Existing interfaces: ${EXISTING_AWG_INTERFACES[*]:-none} (unchanged)"
+	echo "  New interface: ${SERVER_AWG_NIC}"
+	echo "  New VPN listener: UDP ${SERVER_PORT}"
+	echo "  New tunnel addresses: ${SERVER_AWG_IPV4}/16, ${SERVER_AWG_IPV6}/64"
+	if [[ ${REUSE_EXISTING_API} == 1 ]]; then
+		echo "  Management API: upgrade ${API_SERVICE_NAME} on existing TCP ${API_PORT}"
+		echo "    Existing API token and backend server record: preserved"
+		echo "    New API target: ${AMNEZIAWG_DIR}/${SERVER_AWG_NIC}.conf"
+		echo "    Legacy ${LEGACY_WG_CONFIG_FILE}: remains running during config rotation"
+	else
+		echo "  New node API: TCP ${API_PORT} via ${API_SERVICE_NAME}"
+	fi
+	echo "  New params file: ${SERVER_PARAMS_FILE}"
+	echo "  New clients directory: ${AWG_CLIENTS_DIR}"
+	echo ""
+	validate_installation_choices || exit 1
+	read -rp "Type INSTALL-AWG2 to confirm these changes: " INSTALL_CONFIRMATION
+	if [[ ${INSTALL_CONFIRMATION} != INSTALL-AWG2 ]]; then
+		echo "Installation cancelled; no configuration changes were made."
+		exit 0
+	fi
 }
 
 function installAmneziaWG() {
@@ -613,12 +955,13 @@ SERVER_AWG_H1=${SERVER_AWG_H1}
 SERVER_AWG_H2=${SERVER_AWG_H2}
 SERVER_AWG_H3=${SERVER_AWG_H3}
 SERVER_AWG_H4=${SERVER_AWG_H4}
-AWG_PROFILE=awg2" >"${AMNEZIAWG_DIR}/params"
-	printf "SERVER_AWG_I1='%s'\n" "${SERVER_AWG_I1}" >>"${AMNEZIAWG_DIR}/params"
-	printf "SERVER_AWG_I2='%s'\n" "${SERVER_AWG_I2}" >>"${AMNEZIAWG_DIR}/params"
-	printf "SERVER_AWG_I3='%s'\n" "${SERVER_AWG_I3}" >>"${AMNEZIAWG_DIR}/params"
-	printf "SERVER_AWG_I4='%s'\n" "${SERVER_AWG_I4}" >>"${AMNEZIAWG_DIR}/params"
-	printf "SERVER_AWG_I5='%s'\n" "${SERVER_AWG_I5}" >>"${AMNEZIAWG_DIR}/params"
+AWG_PROFILE=awg2" >"${SERVER_PARAMS_FILE}"
+	chmod 600 "${SERVER_PARAMS_FILE}"
+	printf "SERVER_AWG_I1='%s'\n" "${SERVER_AWG_I1}" >>"${SERVER_PARAMS_FILE}"
+	printf "SERVER_AWG_I2='%s'\n" "${SERVER_AWG_I2}" >>"${SERVER_PARAMS_FILE}"
+	printf "SERVER_AWG_I3='%s'\n" "${SERVER_AWG_I3}" >>"${SERVER_PARAMS_FILE}"
+	printf "SERVER_AWG_I4='%s'\n" "${SERVER_AWG_I4}" >>"${SERVER_PARAMS_FILE}"
+	printf "SERVER_AWG_I5='%s'\n" "${SERVER_AWG_I5}" >>"${SERVER_PARAMS_FILE}"
 
 	# Add server interface
 	echo "[Interface]
@@ -793,22 +1136,50 @@ net.ipv6.conf.all.forwarding = 1" >/etc/sysctl.d/awg.conf
 		echo -e "${ORANGE}If you don't have internet connectivity from your client, try to reboot the server.${NC}"
 	fi
 	
-	# Install WireGuard API
+	# Install the WireGuard API. On a co-located node, upgrade the existing TCP
+	# service in place and point it at the new AWG2 interface while preserving
+	# the existing API token and backend endpoint.
 	echo -e "\n${GREEN}Installing WireGuard API...${NC}"
-	bash ./service.sh
+	if [[ ${REUSE_EXISTING_API} == 1 ]]; then
+		AWG_INTERFACE="${SERVER_AWG_NIC}" \
+		INSTALL_BINARY="${API_BINARY_PATH}" \
+		CONFIG_DIR="${API_CONFIG_DIR}" \
+		SERVICE_NAME="${API_SERVICE_NAME}" \
+		API_PORT="${API_PORT}" \
+		UPGRADE_EXISTING_SERVICE=true \
+		WG_CONFIG_FILE="${SERVER_AWG_CONF}" \
+		WG_PARAMS_FILE="${SERVER_PARAMS_FILE}" \
+		WIREGUARD_CLIENTS="${AWG_CLIENTS_DIR}" \
+		bash ./service.sh
+	else
+		AWG_INTERFACE="${SERVER_AWG_NIC}" \
+		INSTALL_BINARY="${API_BINARY_PATH}" \
+		CONFIG_DIR="${API_CONFIG_DIR}" \
+		SERVICE_NAME="${API_SERVICE_NAME}" \
+		API_PORT="${API_PORT}" \
+		WG_CONFIG_FILE="${SERVER_AWG_CONF}" \
+		WG_PARAMS_FILE="${SERVER_PARAMS_FILE}" \
+		WIREGUARD_CLIENTS="${AWG_CLIENTS_DIR}" \
+		bash ./service.sh
+	fi
 	
 	# Write AmneziaWG port to .env file
-	CONFIG_DIR="/etc/wireguard-api"
+	CONFIG_DIR="${API_CONFIG_DIR}"
 	if [ -f "$CONFIG_DIR/.env" ]; then
-		# Add or update AWG_PORT in .env file
-		if grep -q "^AWG_PORT=" "$CONFIG_DIR/.env"; then
-			# Replace existing AWG_PORT line
-			sed -i "s/^AWG_PORT=.*$/AWG_PORT=${SERVER_PORT}/" "$CONFIG_DIR/.env"
-		else
-			# Add AWG_PORT line if it doesn't exist
-			echo "AWG_PORT=${SERVER_PORT}" >> "$CONFIG_DIR/.env"
+		PORT_ENV_KEY=AWG_PORT
+		if [[ ${REUSE_EXISTING_API} == 1 && ${LEGACY_SERVER_PORT:-unknown} =~ ^[0-9]+$ ]]; then
+			if grep -q '^LEGACY_AWG_PORT=' "$CONFIG_DIR/.env"; then
+				sed -i "s/^LEGACY_AWG_PORT=.*$/LEGACY_AWG_PORT=${LEGACY_SERVER_PORT}/" "$CONFIG_DIR/.env"
+			else
+				echo "LEGACY_AWG_PORT=${LEGACY_SERVER_PORT}" >>"$CONFIG_DIR/.env"
+			fi
 		fi
-		echo -e "${GREEN}AmneziaWG port (${SERVER_PORT}) written to $CONFIG_DIR/.env${NC}"
+		if grep -q "^${PORT_ENV_KEY}=" "$CONFIG_DIR/.env"; then
+			sed -i "s/^${PORT_ENV_KEY}=.*$/${PORT_ENV_KEY}=${SERVER_PORT}/" "$CONFIG_DIR/.env"
+		else
+			echo "${PORT_ENV_KEY}=${SERVER_PORT}" >> "$CONFIG_DIR/.env"
+		fi
+		echo -e "${GREEN}${PORT_ENV_KEY} (${SERVER_PORT}) written to $CONFIG_DIR/.env${NC}"
 	else
 		echo -e "${ORANGE}Warning: .env file not found at $CONFIG_DIR/.env. Cannot write AmneziaWG port.${NC}"
 	fi
@@ -958,10 +1329,29 @@ fi
 # Check for root, virt, OS...
 initialCheck
 
-# Check if AmneziaWG is already installed and load params
-if [[ -e "${AMNEZIAWG_DIR}/params" ]]; then
-	loadParams
-	manageMenu
-else
-	installAmneziaWG
+# Inventory the host before any package or configuration mutation. A legacy
+# installation can coexist with AWG2, but an existing AWG2 installation should
+# be managed rather than duplicated by rerunning this entry point.
+detect_existing_awg_installations
+if ((AWG2_DETECTED == 1)); then
+	print_existing_awg_summary
+	echo "An AWG2 interface is already configured on this host. No changes were made."
+	exit 0
 fi
+
+if ((LEGACY_AWG_DETECTED == 1)); then
+	print_existing_awg_summary
+	echo "This installer can add AWG2 alongside the legacy installation using isolated resources."
+	read -rp "Continue with a side-by-side AWG2 installation? [y/N]: " INSTALL_ALONGSIDE
+	INSTALL_ALONGSIDE=${INSTALL_ALONGSIDE:-N}
+	if [[ ! ${INSTALL_ALONGSIDE} =~ ^[Yy]$ ]]; then
+		if [[ -e ${AMNEZIAWG_DIR}/params ]]; then
+			loadParams
+			manageMenu
+		fi
+		echo "Installation cancelled; no changes were made."
+		exit 0
+	fi
+fi
+
+installAmneziaWG

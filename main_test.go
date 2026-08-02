@@ -85,6 +85,7 @@ PrivateKey = server-private-key
 	oldParamsFile, oldBackendType := WG_PARAMS_FILE, backendType
 	oldAWGProfile := AWG_PROFILE
 	oldUseUDP443Endpoint := USE_UDP_443_ENDPOINT
+	oldConfigFileExplicit, oldParamsFileExplicit := configFileExplicit, paramsFileExplicit
 
 	WG_CONFIG_FILE = configFile
 	WG_PARAMS_FILE = filepath.Join(dir, "params")
@@ -94,6 +95,8 @@ PrivateKey = server-private-key
 	API_TOKEN = "test-token"
 	USE_UDP_443_ENDPOINT = false
 	AWG_PROFILE = "awg2"
+	configFileExplicit = false
+	paramsFileExplicit = false
 	wgParams = WGParams{
 		ServerPubIP:   "203.0.113.10",
 		ServerWGNIC:   "wg0",
@@ -114,6 +117,7 @@ PrivateKey = server-private-key
 		wgParams, API_TOKEN = oldParams, oldToken
 		AWG_PROFILE = oldAWGProfile
 		USE_UDP_443_ENDPOINT = oldUseUDP443Endpoint
+		configFileExplicit, paramsFileExplicit = oldConfigFileExplicit, oldParamsFileExplicit
 	})
 
 	// Use the production router so tests exercise the exact routing + middleware
@@ -249,7 +253,7 @@ func TestAuthMiddleware(t *testing.T) {
 	}
 }
 
-func TestHealthEndpointReturnsOnlyRunningState(t *testing.T) {
+func TestHealthEndpointReturnsRunningStateAndContextIdentity(t *testing.T) {
 	env := setupTestEnv(t)
 
 	recorder := env.authedRequest(t, http.MethodGet, "/api/health", nil)
@@ -260,13 +264,15 @@ func TestHealthEndpointReturnsOnlyRunningState(t *testing.T) {
 	var resp struct {
 		Success bool `json:"success"`
 		Data    struct {
-			Running bool `json:"running"`
+			Running   bool   `json:"running"`
+			Interface string `json:"interface"`
+			Profile   string `json:"profile"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(recorder.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decoding response: %v", err)
 	}
-	if !resp.Success || !resp.Data.Running {
+	if !resp.Success || !resp.Data.Running || resp.Data.Interface != "wg0" || resp.Data.Profile != "awg2" {
 		t.Fatalf("unexpected health response: %s", recorder.Body.String())
 	}
 	if strings.Contains(recorder.Body.String(), "peers") || strings.Contains(recorder.Body.String(), "status_output") {
@@ -495,6 +501,8 @@ func TestLoadAWG2Params(t *testing.T) {
 	backendType = "amneziawg"
 	AWG_PROFILE = "awg2"
 	paramsPath := filepath.Join(env.dir, "awg2-params")
+	explicitConfigPath := filepath.Join(env.dir, "awg1-custom.conf")
+	t.Setenv("WG_CONFIG_FILE", explicitConfigPath)
 	params := `SERVER_PUB_IP=203.0.113.10
 SERVER_PUB_NIC=eth0
 SERVER_AWG_NIC=awg0
@@ -539,6 +547,47 @@ SERVER_AWG_I5='<t>'
 	}
 	if wgParams.ServerAWGI1 != "<b 0x1234>" || wgParams.ServerAWGI5 != "<t>" {
 		t.Errorf("I fields not loaded: I1=%q I5=%q", wgParams.ServerAWGI1, wgParams.ServerAWGI5)
+	}
+	if WG_CONFIG_FILE != explicitConfigPath {
+		t.Errorf("explicit config path was replaced: got %q want %q", WG_CONFIG_FILE, explicitConfigPath)
+	}
+}
+
+func TestDetectBackendUsesExplicitAmneziaParams(t *testing.T) {
+	dir := t.TempDir()
+	paramsPath := filepath.Join(dir, "params.awg1")
+	configPath := filepath.Join(dir, "custom-awg1.conf")
+	awgPath := filepath.Join(dir, "awg")
+	if err := os.WriteFile(paramsPath, []byte("SERVER_AWG_NIC=awg1\n"), 0600); err != nil {
+		t.Fatalf("writing params: %v", err)
+	}
+	if err := os.WriteFile(awgPath, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatalf("writing fake awg: %v", err)
+	}
+
+	t.Setenv("PATH", dir)
+	t.Setenv("WG_PARAMS_FILE", paramsPath)
+	oldBackendType, oldParamsFile, oldConfigFile := backendType, WG_PARAMS_FILE, WG_CONFIG_FILE
+	oldWGCmd, oldWGQuickCmd := wgCmd, wgQuickCmd
+	oldParamsFileExplicit, oldConfigFileExplicit := paramsFileExplicit, configFileExplicit
+	WG_CONFIG_FILE = configPath
+	configFileExplicit = true
+	paramsFileExplicit = false
+	t.Cleanup(func() {
+		backendType, WG_PARAMS_FILE, WG_CONFIG_FILE = oldBackendType, oldParamsFile, oldConfigFile
+		wgCmd, wgQuickCmd = oldWGCmd, oldWGQuickCmd
+		paramsFileExplicit, configFileExplicit = oldParamsFileExplicit, oldConfigFileExplicit
+	})
+
+	detectBackend()
+	if backendType != "amneziawg" {
+		t.Fatalf("explicit AWG params should select amneziawg backend, got %q", backendType)
+	}
+	if WG_PARAMS_FILE != paramsPath {
+		t.Fatalf("got params path %q want %q", WG_PARAMS_FILE, paramsPath)
+	}
+	if WG_CONFIG_FILE != configPath {
+		t.Fatalf("explicit config path was replaced: got %q want %q", WG_CONFIG_FILE, configPath)
 	}
 }
 

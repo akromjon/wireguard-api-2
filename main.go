@@ -22,12 +22,14 @@ import (
 
 var (
 	// Configuration
-	API_PORT          = getEnv("API_PORT", "8080")
-	API_TOKEN         = getEnv("API_TOKEN", "your-secure-api-token") // Default if not in .env
-	WG_CONFIG_FILE    = getEnv("WG_CONFIG_FILE", "/etc/wireguard/wg0.conf")
-	WG_PARAMS_FILE    = getEnv("WG_PARAMS_FILE", "/etc/wireguard/params")
-	WIREGUARD_CLIENTS = getEnv("WIREGUARD_CLIENTS", "/home/wireguard/users")
-	DEBUG_MODE        = getEnv("DEBUG_MODE", "false") == "true"
+	API_PORT           = getEnv("API_PORT", "8080")
+	API_TOKEN          = getEnv("API_TOKEN", "your-secure-api-token") // Default if not in .env
+	WG_CONFIG_FILE     = getEnv("WG_CONFIG_FILE", "/etc/wireguard/wg0.conf")
+	WG_PARAMS_FILE     = getEnv("WG_PARAMS_FILE", "/etc/wireguard/params")
+	WIREGUARD_CLIENTS  = getEnv("WIREGUARD_CLIENTS", "/home/wireguard/users")
+	configFileExplicit = getEnv("WG_CONFIG_FILE", "") != ""
+	paramsFileExplicit = getEnv("WG_PARAMS_FILE", "") != ""
+	DEBUG_MODE         = getEnv("DEBUG_MODE", "false") == "true"
 	// This changes only the endpoint port written to newly generated client configs.
 	// SERVER_PORT and the WireGuard/AmneziaWG listener remain unchanged.
 	USE_UDP_443_ENDPOINT = strings.EqualFold(getEnv("USE_UDP_443_ENDPOINT", "false"), "true")
@@ -173,13 +175,22 @@ func getEnv(key, fallback string) string {
 func detectBackend() {
 	// Check if AmneziaWG is installed
 	if _, err := exec.LookPath("awg"); err == nil {
-		// Check if AmneziaWG params file exists
-		if _, err := os.Stat("/etc/amnezia/amneziawg/params"); err == nil {
+		// Prefer an explicitly selected params file. Co-located legacy and AWG2
+		// instances keep separate params files, so the default legacy path is not
+		// sufficient to identify the intended instance.
+		paramsFile := WG_PARAMS_FILE
+		if !paramsFileExplicit {
+			paramsFile = getEnv("WG_PARAMS_FILE", paramsFile)
+		}
+		if paramsFile == "" {
+			paramsFile = "/etc/amnezia/amneziawg/params"
+		}
+		if _, err := os.Stat(paramsFile); err == nil {
 			backendType = "amneziawg"
 			wgCmd = "awg"
 			wgQuickCmd = "awg-quick"
 			wgServicePrefix = "awg-quick@"
-			WG_PARAMS_FILE = "/etc/amnezia/amneziawg/params"
+			WG_PARAMS_FILE = paramsFile
 			// Try to detect interface name from params
 			if file, err := os.Open(WG_PARAMS_FILE); err == nil {
 				defer file.Close()
@@ -190,7 +201,9 @@ func detectBackend() {
 						parts := strings.SplitN(line, "=", 2)
 						if len(parts) == 2 {
 							nic := strings.TrimSpace(strings.Trim(parts[1], "\"'"))
-							WG_CONFIG_FILE = fmt.Sprintf("/etc/amnezia/amneziawg/%s.conf", nic)
+							if !configFileExplicit {
+								WG_CONFIG_FILE = fmt.Sprintf("/etc/amnezia/amneziawg/%s.conf", nic)
+							}
 							break
 						}
 					}
@@ -221,6 +234,18 @@ func loadEnv() {
 	API_PORT = getEnv("API_PORT", "8080")
 	API_TOKEN = getEnv("API_TOKEN", "your-secure-api-token")
 	WIREGUARD_CLIENTS = getEnv("WIREGUARD_CLIENTS", "/home/wireguard/users")
+	if cfgFile := getEnv("WG_CONFIG_FILE", ""); cfgFile != "" {
+		WG_CONFIG_FILE = cfgFile
+		configFileExplicit = true
+	} else {
+		configFileExplicit = false
+	}
+	if paramsFile := getEnv("WG_PARAMS_FILE", ""); paramsFile != "" {
+		WG_PARAMS_FILE = paramsFile
+		paramsFileExplicit = true
+	} else {
+		paramsFileExplicit = false
+	}
 	DEBUG_MODE = getEnv("DEBUG_MODE", "false") == "true"
 	USE_UDP_443_ENDPOINT = strings.EqualFold(getEnv("USE_UDP_443_ENDPOINT", "false"), "true")
 	AWG_PROFILE = strings.ToLower(getEnv("AWG_PROFILE", "awg2"))
@@ -228,22 +253,18 @@ func loadEnv() {
 	// Detect backend type (this will set WG_CONFIG_FILE and WG_PARAMS_FILE)
 	detectBackend()
 
-	// Allow environment variables to override detected paths ONLY if backend is WireGuard
-	// For AmneziaWG, always use detected paths to ensure correctness
-	if backendType == "wireguard" {
-		if cfgFile := getEnv("WG_CONFIG_FILE", ""); cfgFile != "" {
-			WG_CONFIG_FILE = cfgFile
-		}
-		if paramsFile := getEnv("WG_PARAMS_FILE", ""); paramsFile != "" {
-			WG_PARAMS_FILE = paramsFile
-		}
-	}
+	// Explicit paths are required when a legacy interface and an AWG2 interface
+	// run on the same VPS. They are also useful for non-default WireGuard setups.
 }
 
 // Main function
 func main() {
 	// Load environment variables
 	loadEnv()
+
+	if err := loadWGParams(); err != nil {
+		log.Fatalf("Failed to load VPN parameters: %v", err)
+	}
 
 	// Log configuration
 	log.Printf("Starting WireGuard API server...")
@@ -255,12 +276,6 @@ func main() {
 	log.Printf("Debug mode: %v", DEBUG_MODE)
 	log.Printf("UDP 443 client endpoint mode: %v", USE_UDP_443_ENDPOINT)
 	log.Printf("AmneziaWG profile: %s", AWG_PROFILE)
-
-	// Load VPN params
-	err := loadWGParams()
-	if err != nil {
-		log.Fatalf("Failed to load VPN parameters: %v", err)
-	}
 
 	// Set Gin to release mode in production
 	if !DEBUG_MODE {
@@ -302,6 +317,12 @@ func newRouter() *gin.Engine {
 func loadWGParams() error {
 	if AWG_PROFILE != "awg2" && AWG_PROFILE != "legacy" {
 		return fmt.Errorf("unsupported AWG_PROFILE %q; use awg2 or legacy", AWG_PROFILE)
+	}
+	if !configFileExplicit {
+		if configuredConfigFile := getEnv("WG_CONFIG_FILE", ""); configuredConfigFile != "" {
+			WG_CONFIG_FILE = configuredConfigFile
+			configFileExplicit = true
+		}
 	}
 
 	file, err := os.Open(WG_PARAMS_FILE)
@@ -372,8 +393,9 @@ func loadWGParams() error {
 		ServerAWGI5:   params["SERVER_AWG_I5"],
 	}
 
-	// Update config file path if interface name was detected
-	if wgParams.ServerWGNIC != "" {
+	// Derive the conventional config path unless this API instance was given an
+	// explicit one. An explicit path keeps co-located instances isolated.
+	if !configFileExplicit && wgParams.ServerWGNIC != "" {
 		if backendType == "amneziawg" {
 			WG_CONFIG_FILE = fmt.Sprintf("/etc/amnezia/amneziawg/%s.conf", wgParams.ServerWGNIC)
 		} else {
@@ -1755,8 +1777,10 @@ func wireGuardHealthHandlerGin(c *gin.Context) {
 
 	c.JSON(http.StatusOK, APIResponse{
 		Success: true,
-		Data: map[string]bool{
-			"running": statusSuccess == "success",
+		Data: map[string]interface{}{
+			"running":   statusSuccess == "success",
+			"interface": wgParams.ServerWGNIC,
+			"profile":   AWG_PROFILE,
 		},
 	})
 }
@@ -1869,6 +1893,7 @@ func wireGuardStatusHandlerGin(c *gin.Context) {
 	// Prepare the response data
 	statusData := map[string]interface{}{
 		"interface":        wgParams.ServerWGNIC,
+		"profile":          AWG_PROFILE,
 		"running":          statusSuccess == "success",
 		"status_output":    statusOutput,
 		"interface_output": interfaceOutput,

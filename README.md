@@ -1,14 +1,16 @@
 # WireGuard API V2
 
-WireGuard-compatible node API for provisioning clients on a dedicated
-AmneziaWG 2.0 server. The HTTP API remains compatible with the existing
+WireGuard-compatible node API for provisioning clients on an AmneziaWG 2.0
+server. The HTTP API remains compatible with the existing
 `wireguard-api` node contract, so the backend can register this as a separate
 server without changing its provisioning calls.
 
-This repository is for new AWG2 VPSs. Existing AWG1/legacy VPSs and their
-configs are not modified.
+The installer supports either a clean AWG2 VPS or an isolated AWG2 interface
+alongside an existing AWG1/legacy interface. Existing legacy VPN configs,
+peers, and listener ports are not rewritten; the existing node API binary is
+upgraded in place to generate AWG2 configs.
 
-## Install on a clean VPS
+## Install on a clean or legacy VPS
 
 Use the AWG2-only entry point:
 
@@ -21,14 +23,28 @@ sudo ./install2.sh
 The installer:
 
 - installs the AmneziaWG kernel/tools packages for the host OS;
-- creates a new `awg0` interface and `/etc/amnezia/amneziawg/params`;
+- inventories existing AWG configs, live interfaces, VPN UDP ports, and node
+  API TCP ports before making changes;
+- creates `awg0` on a clean host or proposes the next free interface such as
+  `awg1` when a legacy interface is present;
+- assigns a separate params file, tunnel network, generated-client directory,
+  and VPN UDP port to a co-located AWG2 interface;
 - writes an AWG2 server config with S3, S4, and non-overlapping H ranges;
-- installs the API service and sets `AWG_PROFILE=awg2`;
-- leaves legacy VPSs outside this repository untouched.
+- installs the API service on a clean host or upgrades the existing binary on
+  its current TCP port, preserving the API token and backend endpoint;
+- displays the complete installation layout and requires the operator to type
+  `INSTALL-AWG2` before changing the host.
 
-Use a separate VPS and backend server record for this pool. Do not point an
-existing AWG1 server record at this node until the node has been tested with
-the intended iOS client engine.
+The existing legacy UDP port is reported but reserved. A co-located AWG2
+interface must use a different UDP port; changing only the port does not make a
+legacy wire profile compatible with AWG2. A lower unused port, including UDP
+443 when available, may improve reachability on restrictive networks.
+
+On a co-located upgrade, the existing backend server record, public IP, TCP
+port, and API token remain unchanged. After the service restart, provisioning
+calls on that endpoint create AWG2 configs for `awg1`. The legacy `awg0`
+interface remains up temporarily so previously issued configs continue to pass
+traffic during rotation.
 
 `install.sh` is also AWG2-only for convenience. `install2.sh` is the preferred
 stable entry point and accepts `WIREGUARD_API_REPOSITORY` and
@@ -81,9 +97,16 @@ parameter such as `S3` or `S4`. Missing AWG2 metadata is therefore a startup
 error on an AmneziaWG v2 node. `AWG_PROFILE=legacy` is retained only for
 controlled compatibility tests; it is not the production installer default.
 
-Old AWG1 configs should stay on the existing AWG1 nodes. A new AWG2 config
-requires a client engine that supports AWG2 and the corresponding server
-implementation; do not silently rewrite old configs in place.
+The installer does not perform client-version gating. It assumes AWG2 config
+compatibility has already been validated for the supported client population.
+Previously issued legacy configs remain usable through `awg0` while users are
+rotated to newly generated AWG2 configs.
+
+The node installer does not rewrite configuration assignments already stored by
+the backend. Before retiring `awg0`, run a separate controlled backend rotation
+that generates or imports AWG2 configurations and replaces each user's stored
+legacy assignment. No application-version gating is needed because AWG2 config
+compatibility with the supported devices has already been validated.
 
 ## API
 
@@ -107,6 +130,20 @@ Available routes:
 The request and response shapes are intentionally the same as v1. See
 [`openapi.yml`](./openapi.yml) for the complete contract.
 
+### Co-located API service
+
+There is still only one node API process and one public management port:
+
+| Stage | VPN interface | API service | API port | API token |
+| --- | --- | --- | --- | --- |
+| Before upgrade | `awg0` legacy | `wireguard.service` | TCP `8080` | Existing token |
+| After upgrade | `awg1` AWG2 | `wireguard.service` | TCP `8080` | Same token |
+
+The upgraded service loads the AWG2 config, params, and generated-client path.
+It verifies that the existing token now reaches `awg1` on the existing TCP
+port. If verification fails, the installer restores the previous binary,
+environment, and systemd unit. It does not create a duplicate backend record.
+
 ## Build and test
 
 ```bash
@@ -116,17 +153,21 @@ go build -o wireguard-api-2 .
 ./build.sh
 ```
 
-`build.sh` creates release binaries under `bin/`. `service.sh` expects the
-published release tag `v2.0.0` by default; override it with
+`build.sh` creates release binaries under `bin/`. The coexistence-aware
+`service.sh` expects the published release tag `v2.1.0` by default; override it with
 `WIREGUARD_API_RELEASE_TAG` during a canary release.
 
 ## Operations
 
 ```bash
-systemctl status awg-quick@awg0
+systemctl status awg-quick@awg1
 systemctl status wireguard.service
 journalctl -u wireguard.service -f
 ```
+
+After the upgrade, `wireguard.service` manages `awg1`. The legacy `awg0`
+interface stays running only as the temporary data-plane fallback for old
+configs until the rotation is complete.
 
 Keep the API token private and restrict access to the API port with the VPS
 firewall or a trusted control-plane network.

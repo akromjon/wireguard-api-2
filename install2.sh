@@ -36,15 +36,16 @@ if ! command -v git >/dev/null 2>&1; then
 	fi
 fi
 
-printf '%b\n' "${GREEN}Installing WireGuard API V2 with AmneziaWG 2.0 on a clean VPS.${NC}"
+printf '%b\n' "${GREEN}Preparing WireGuard API V2 with AmneziaWG 2.0.${NC}"
 printf '%b\n' "${YELLOW}Repository: ${REPOSITORY}; ref: ${REF}${NC}"
 
 git clone --depth 1 --branch "${REF}" "${REPOSITORY}" "${TEMP_DIR}/source"
 cd "${TEMP_DIR}/source"
 chmod +x amneziawg-install.sh service.sh
 
-# This entry point is deliberately AWG2-only. It does not discover or alter
-# existing AWG1 interfaces; deploy this repository on a separate VPS/pool.
+# This entry point is AWG2-only. The delegated installer inventories existing
+# AWG interfaces and either performs a clean install or offers an isolated
+# side-by-side interface after explicit operator confirmation.
 export AWG_PROFILE=awg2
 ./amneziawg-install.sh
 

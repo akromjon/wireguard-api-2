@@ -315,7 +315,7 @@ paths:
   /api/health:
     get:
       summary: Get lightweight WireGuard health
-      description: Returns only whether the WireGuard/AmneziaWG interface is running.
+      description: Returns the configured interface's running state and lightweight profile identity.
       operationId: getWireGuardHealth
       responses:
         '200':
@@ -335,10 +335,19 @@ paths:
                     type: object
                     required:
                       - running
+                      - interface
+                      - profile
                     properties:
                       running:
                         type: boolean
                         example: true
+                      interface:
+                        type: string
+                        example: awg1
+                      profile:
+                        type: string
+                        enum: [legacy, awg2]
+                        example: awg2
         '404':
           description: Unauthorized - Missing or invalid API token
 
