@@ -305,6 +305,7 @@ func newRouter() *gin.Engine {
 
 	// WireGuard status route
 	router.GET("/api/health", wireGuardHealthHandlerGin)
+	router.GET("/api/stats", wireGuardStatsHandlerGin)
 	router.GET("/api/status", wireGuardStatusHandlerGin)
 	router.POST("/api/start", wireGuardStartHandlerGin)
 	router.POST("/api/stop", wireGuardStopHandlerGin)
@@ -1767,6 +1768,83 @@ func clientConfigExists(clientName string) bool {
 	simpleConfigPath := filepath.Join(WIREGUARD_CLIENTS, clientName+".conf")
 
 	return fileExists(standardConfigPath) || fileExists(alternativeConfigPath) || fileExists(simpleConfigPath)
+}
+
+// WireGuard stats handler - interface byte counters and peer count, nothing
+// else. Like /api/health this is deliberately side-effect free: it does NOT
+// synchronize clients and does NOT dump per-peer state.
+//
+// Bandwidth reporting used to read /api/status, which syncs the client list and
+// then serializes every peer - several seconds and megabytes of JSON on a node
+// holding 1,500 peers, to produce two numbers. The kernel already keeps those
+// two numbers in /sys, so read them directly: it is O(1) regardless of peer
+// count, and it counts real interface traffic rather than a sum of per-peer
+// counters that resets whenever a peer is re-added.
+func wireGuardStatsHandlerGin(c *gin.Context) {
+	nic := wgParams.ServerWGNIC
+
+	rx, rxErr := readInterfaceCounter(nic, "rx_bytes")
+	tx, txErr := readInterfaceCounter(nic, "tx_bytes")
+
+	if rxErr != nil || txErr != nil {
+		c.JSON(http.StatusOK, APIResponse{
+			Success: false,
+			Message: fmt.Sprintf("interface %s counters unavailable", nic),
+		})
+		return
+	}
+
+	peers := 0
+	if success, output := executeCommand(wgCmd, "show", nic, "peers"); success == "success" {
+		if trimmed := strings.TrimSpace(output); trimmed != "" {
+			peers = len(strings.Split(trimmed, "\n"))
+		}
+	}
+
+	c.JSON(http.StatusOK, APIResponse{
+		Success: true,
+		Data: map[string]interface{}{
+			"interface": nic,
+			"profile":   AWG_PROFILE,
+			"rx_bytes":  rx,
+			"tx_bytes":  tx,
+			"peers":     peers,
+			// Counters are cumulative since the interface came up, so the
+			// consumer needs this to turn them into a rate.
+			"uptime_seconds": systemUptimeSeconds(),
+		},
+	})
+}
+
+// readInterfaceCounter reads one kernel byte counter for an interface.
+func readInterfaceCounter(nic string, counter string) (uint64, error) {
+	raw, err := os.ReadFile(filepath.Join("/sys/class/net", nic, "statistics", counter))
+	if err != nil {
+		return 0, err
+	}
+
+	return strconv.ParseUint(strings.TrimSpace(string(raw)), 10, 64)
+}
+
+// systemUptimeSeconds returns 0 rather than an error when unreadable - it is
+// context for the counters, not something worth failing the request over.
+func systemUptimeSeconds() uint64 {
+	raw, err := os.ReadFile("/proc/uptime")
+	if err != nil {
+		return 0
+	}
+
+	fields := strings.Fields(string(raw))
+	if len(fields) == 0 {
+		return 0
+	}
+
+	seconds, err := strconv.ParseFloat(fields[0], 64)
+	if err != nil {
+		return 0
+	}
+
+	return uint64(seconds)
 }
 
 // WireGuard health handler - returns only whether the VPN interface is up.

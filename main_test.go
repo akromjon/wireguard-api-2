@@ -283,6 +283,51 @@ func TestHealthEndpointReturnsRunningStateAndContextIdentity(t *testing.T) {
 	}
 }
 
+func TestStatsEndpointReturnsCountersWithoutDumpingPeers(t *testing.T) {
+	env := setupTestEnv(t)
+
+	recorder := env.authedRequest(t, http.MethodGet, "/api/stats", nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("got status %d, body %s", recorder.Code, recorder.Body.String())
+	}
+
+	body := recorder.Body.String()
+
+	// The whole point of this endpoint is that it stays small and cheap no
+	// matter how many peers the node holds, so it must never grow per-peer
+	// fields the way /api/status does.
+	for _, forbidden := range []string{"public_key", "preshared_key", "transfer_rx", "status_output", "system_load"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("stats response leaked per-peer/detail field %q: %s", forbidden, body)
+		}
+	}
+
+	if calls := env.syncconfCalls(t); calls != 0 {
+		t.Errorf("stats endpoint must not synchronize config: got %d syncconf calls", calls)
+	}
+
+	var resp struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Interface string `json:"interface"`
+			Profile   string `json:"profile"`
+			RxBytes   uint64 `json:"rx_bytes"`
+			TxBytes   uint64 `json:"tx_bytes"`
+			Peers     int    `json:"peers"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+
+	// A test host has no wg0, so counters are unreadable and the handler
+	// reports failure rather than inventing zeroes. Either way it must answer
+	// quickly and never expose peer detail, which is asserted above.
+	if resp.Success && (resp.Data.Interface != wgParams.ServerWGNIC || resp.Data.Profile != AWG_PROFILE) {
+		t.Fatalf("unexpected identity in stats response: %s", body)
+	}
+}
+
 func TestHealthEndpointReportsStoppedInterfaceWithoutDetails(t *testing.T) {
 	env := setupTestEnv(t)
 	if err := os.WriteFile(filepath.Join(env.dir, "status_fail"), nil, 0600); err != nil {
