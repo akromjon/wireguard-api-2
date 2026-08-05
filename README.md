@@ -153,9 +153,11 @@ go build -o wireguard-api-2 .
 ./build.sh
 ```
 
-`build.sh` creates release binaries under `bin/`. The coexistence-aware
-`service.sh` expects the published release tag `v2.1.0` by default; override it with
-`WIREGUARD_API_RELEASE_TAG` during a canary release.
+`build.sh` creates release binaries under `bin/`. By default, `service.sh`
+downloads the matching asset from GitHub's latest published release, so the
+installer does not need a hard-coded version bump. Set
+`WIREGUARD_API_RELEASE_TAG` only when a canary or rollback must be pinned to a
+specific release, or set `WIREGUARD_API_BINARY` to install a local binary.
 
 ## Operations
 

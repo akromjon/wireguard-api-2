@@ -1141,7 +1141,7 @@ net.ipv6.conf.all.forwarding = 1" >/etc/sysctl.d/awg.conf
 	# the existing API token and backend endpoint.
 	echo -e "\n${GREEN}Installing WireGuard API...${NC}"
 	if [[ ${REUSE_EXISTING_API} == 1 ]]; then
-		AWG_INTERFACE="${SERVER_AWG_NIC}" \
+		if ! AWG_INTERFACE="${SERVER_AWG_NIC}" \
 		INSTALL_BINARY="${API_BINARY_PATH}" \
 		CONFIG_DIR="${API_CONFIG_DIR}" \
 		SERVICE_NAME="${API_SERVICE_NAME}" \
@@ -1150,9 +1150,12 @@ net.ipv6.conf.all.forwarding = 1" >/etc/sysctl.d/awg.conf
 		WG_CONFIG_FILE="${SERVER_AWG_CONF}" \
 		WG_PARAMS_FILE="${SERVER_PARAMS_FILE}" \
 		WIREGUARD_CLIENTS="${AWG_CLIENTS_DIR}" \
-		bash ./service.sh
+		bash ./service.sh; then
+			echo -e "${RED}WireGuard API installation failed; the AWG2 migration is incomplete.${NC}" >&2
+			return 1
+		fi
 	else
-		AWG_INTERFACE="${SERVER_AWG_NIC}" \
+		if ! AWG_INTERFACE="${SERVER_AWG_NIC}" \
 		INSTALL_BINARY="${API_BINARY_PATH}" \
 		CONFIG_DIR="${API_CONFIG_DIR}" \
 		SERVICE_NAME="${API_SERVICE_NAME}" \
@@ -1160,7 +1163,10 @@ net.ipv6.conf.all.forwarding = 1" >/etc/sysctl.d/awg.conf
 		WG_CONFIG_FILE="${SERVER_AWG_CONF}" \
 		WG_PARAMS_FILE="${SERVER_PARAMS_FILE}" \
 		WIREGUARD_CLIENTS="${AWG_CLIENTS_DIR}" \
-		bash ./service.sh
+		bash ./service.sh; then
+			echo -e "${RED}WireGuard API installation failed; the AWG2 installation is incomplete.${NC}" >&2
+			return 1
+		fi
 	fi
 	
 	# Write AmneziaWG port to .env file

@@ -4,8 +4,19 @@ set -Eeuo pipefail
 
 # github: https://github.com/akromjon/wireguard-api-2
 RELEASE_REPO=${RELEASE_REPO:-akromjon/wireguard-api-2}
-RELEASE_TAG=${WIREGUARD_API_RELEASE_TAG:-v2.1.0}
-URL_PREFIX="https://github.com/${RELEASE_REPO}/releases/download/${RELEASE_TAG}"
+
+resolve_release_source() {
+	RELEASE_TAG=${WIREGUARD_API_RELEASE_TAG:-}
+	if [[ -n ${RELEASE_TAG} ]]; then
+		RELEASE_LABEL=${RELEASE_TAG}
+		URL_PREFIX="https://github.com/${RELEASE_REPO}/releases/download/${RELEASE_TAG}"
+	else
+		RELEASE_LABEL="latest published release"
+		URL_PREFIX="https://github.com/${RELEASE_REPO}/releases/latest/download"
+	fi
+}
+
+resolve_release_source
 
 AWG_INTERFACE=${AWG_INTERFACE:-awg0}
 INSTALL_BINARY=${INSTALL_BINARY:-/usr/local/bin/wireguard}
@@ -83,9 +94,9 @@ install_binary() (
 		echo "Installing API binary from ${WIREGUARD_API_BINARY}"
 		cp "${WIREGUARD_API_BINARY}" "${temporary_binary}"
 	else
-		echo "Downloading ${FILENAME} from ${RELEASE_REPO} ${RELEASE_TAG}"
+		echo "Downloading ${FILENAME} from ${RELEASE_REPO} (${RELEASE_LABEL})"
 		if ! curl -sSLf "${URL_PREFIX}/${FILENAME}" -o "${temporary_binary}"; then
-			echo "Failed to download the V2 release; publish ${RELEASE_TAG} or set WIREGUARD_API_BINARY" >&2
+			echo "Failed to download ${FILENAME} from ${RELEASE_LABEL}; publish a compatible release asset or set WIREGUARD_API_BINARY" >&2
 			exit 1
 		fi
 	fi

@@ -79,6 +79,14 @@ mkdir -p "${CONFIG_DIR}"
 printf '%s\n' 'API_PORT=8080' 'API_TOKEN=legacy-api-token-1234567890' >"${CONFIG_DIR}/.env"
 # shellcheck source=service.sh
 source "${SCRIPT_DIR}/service.sh"
+[[ ${URL_PREFIX} == "https://github.com/${RELEASE_REPO}/releases/latest/download" ]] || fail "service should download the latest published release by default"
+[[ ${RELEASE_LABEL} == "latest published release" ]] || fail "latest release label was not selected"
+(
+	WIREGUARD_API_RELEASE_TAG=v9.8.7
+	resolve_release_source
+	[[ ${URL_PREFIX} == "https://github.com/${RELEASE_REPO}/releases/download/v9.8.7" ]]
+	[[ ${RELEASE_LABEL} == v9.8.7 ]]
+) || fail "explicit release tag override should remain available"
 prepare_environment
 grep -qx 'API_PORT=8080' "${CONFIG_DIR}/.env" || fail "existing API port should be preserved"
 grep -qx 'API_TOKEN=legacy-api-token-1234567890' "${CONFIG_DIR}/.env" || fail "existing API token should be preserved"
