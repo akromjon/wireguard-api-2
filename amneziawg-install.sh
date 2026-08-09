@@ -553,6 +553,21 @@ function readH1AndH2AndH3AndH4() {
 	done
 }
 
+# Per-node random defaults for the AWG2 paddings, mirroring generateS1AndS2.
+#
+# S4 is the reason AWG2 exists: it pads every TRANSPORT packet, so it is the
+# first AmneziaWG feature to obfuscate the data plane rather than just the
+# handshake. Defaulting it to 0 shipped nodes with the feature switched off.
+#
+# The low end of each range is deliberately above 0 — a 1-2 byte pad shifts the
+# header without meaningfully changing the size profile, and 0 disables the
+# feature entirely. Randomising per node beats a fleet-wide constant: a shared
+# offset is one fingerprint to learn, a per-node offset is 34.
+function generateS3AndS4() {
+	RANDOM_AWG_S3=$(shuf -i8-64 -n1)
+	RANDOM_AWG_S4=$(shuf -i4-32 -n1)
+}
+
 # Validates an S3/S4 padding answer. Extracted so the prompt guard is
 # testable without driving an interactive read.
 function s_padding_in_range() {
@@ -572,10 +587,10 @@ function readS3AndS4() {
 	SERVER_AWG_S3=""
 	SERVER_AWG_S4=""
 	until s_padding_in_range "${SERVER_AWG_S3}" 64; do
-		read -rp "Server AmneziaWG S3 padding [0-64, 0 disables]: " -e -i 0 SERVER_AWG_S3
+		read -rp "Server AmneziaWG S3 padding [0-64, 0 disables]: " -e -i "${RANDOM_AWG_S3}" SERVER_AWG_S3
 	done
 	until s_padding_in_range "${SERVER_AWG_S4}" 32; do
-		read -rp "Server AmneziaWG S4 padding [0-32, 0 disables]: " -e -i 0 SERVER_AWG_S4
+		read -rp "Server AmneziaWG S4 padding [0-32, 0 disables]: " -e -i "${RANDOM_AWG_S4}" SERVER_AWG_S4
 	done
 }
 
@@ -822,6 +837,9 @@ function installQuestions() {
 
 	# AWG2-only additions. I1-I5 are optional; S3/S4 are always persisted,
 	# including zero, so generated clients receive an unambiguous AWG2 profile.
+	# S3/S4 default to per-node random values, not 0 — S4 padding of the
+	# transport packets is the data-plane obfuscation AWG2 exists to provide.
+	generateS3AndS4
 	readS3AndS4
 	readIParams
 

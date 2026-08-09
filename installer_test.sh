@@ -43,6 +43,21 @@ if s_padding_in_range "-1" 64; then
 	fail "negative padding must be rejected"
 fi
 
+# S4 pads every transport packet — it is the data-plane obfuscation AWG2
+# exists to provide. Defaulting the prompt to 0 shipped nodes with the feature
+# switched off, so the generated defaults must be non-zero and in range.
+if grep -qE 'read -rp "Server AmneziaWG S(3|4) padding.*-i 0 ' "${SCRIPT_DIR}/amneziawg-install.sh"; then
+	fail "S3/S4 prompts must not default to 0 — padding would ship disabled"
+fi
+
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+	generateS3AndS4
+	s_padding_in_range "${RANDOM_AWG_S3}" 64 || fail "generated S3 ${RANDOM_AWG_S3} out of range"
+	s_padding_in_range "${RANDOM_AWG_S4}" 32 || fail "generated S4 ${RANDOM_AWG_S4} out of range"
+	((RANDOM_AWG_S3 >= 8)) || fail "generated S3 ${RANDOM_AWG_S3} below the useful floor"
+	((RANDOM_AWG_S4 >= 4)) || fail "generated S4 ${RANDOM_AWG_S4} below the useful floor"
+done
+
 h_spec_bounds "5" || fail "single H value should be valid"
 h_spec_bounds "5-10" || fail "H range should be valid"
 if h_spec_bounds "4"; then

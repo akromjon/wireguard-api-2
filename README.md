@@ -56,9 +56,26 @@ The installer asks for the AmneziaWG parameters and writes the same values to
 the server and generated client configs:
 
 - `Jc`, `Jmin`, `Jmax`, `S1`, and `S2` retain the existing AmneziaWG behavior.
-- `S3` and `S4` are AWG2 padding values. The documented ranges are `0–64`
-  bytes for S3 and `0–32` bytes for S4. They are always persisted, including
-  `0`, which disables that padding dimension.
+- `S3` and `S4` are AWG2 padding values, always persisted (including `0`,
+  which disables that padding dimension).
+
+  **Amnezia documents no recommended value or range for either.** The 2.0
+  self-hosted docs only note that S3/S4 were added; the kernel-module README
+  covers S1/S2 (`recommended range 15–150`, `S1 + 56 ≠ S2`) and does not
+  mention S3/S4 at all. Neither implementation bounds them — `amneziawg-go`
+  and our Rust core both only require a non-negative integer.
+
+  The `0–64` (S3) and `0–32` (S4) ranges this installer offers are therefore
+  **our own choice, not upstream guidance**. The reasoning: S4 pads *every
+  transport packet*, so it is permanent per-packet overhead against the MTU
+  budget — the same budget that gives S1 its documented `≤ 1132` ceiling at
+  MTU 1280. Keeping S4 small bounds that cost. S3 pads only cookie replies,
+  which are rare, so its size barely matters.
+
+  The installer defaults to a **random non-zero value per node** (S3 `8–64`,
+  S4 `4–32`) rather than a fleet-wide constant: a shared offset is a single
+  fingerprint to learn, a per-node offset is one per node. `0` remains a valid
+  answer if you need to disable padding on a specific node.
 - `H1`–`H4` accept a single value or an inclusive `min-max` range. The
   installer rejects invalid, out-of-bounds, and overlapping ranges.
 - `I1`–`I5` are optional custom signature packet definitions. Empty values are
