@@ -493,8 +493,8 @@ function initialCheck() {
 }
 
 function readJminAndJmax() {
-	SERVER_AWG_JMIN=0
-	SERVER_AWG_JMAX=0
+	SERVER_AWG_JMIN="${SERVER_AWG_JMIN:-0}"
+	SERVER_AWG_JMAX="${SERVER_AWG_JMAX:-0}"
 	until [[ ${SERVER_AWG_JMIN} =~ ^[0-9]+$ ]] && ((${SERVER_AWG_JMIN} >= 1)) && ((${SERVER_AWG_JMIN} <= 1280)); do
 		read -rp "Server AmneziaWG Jmin [1-1280]: " -e -i 50 SERVER_AWG_JMIN
 	done
@@ -509,8 +509,8 @@ function generateS1AndS2() {
 }
 
 function readS1AndS2() {
-	SERVER_AWG_S1=0
-	SERVER_AWG_S2=0
+	SERVER_AWG_S1="${SERVER_AWG_S1:-0}"
+	SERVER_AWG_S2="${SERVER_AWG_S2:-0}"
 	until [[ ${SERVER_AWG_S1} =~ ^[0-9]+$ ]] && ((${SERVER_AWG_S1} >= 15)) && ((${SERVER_AWG_S1} <= 150)); do
 		read -rp "Server AmneziaWG S1 [15-150]: " -e -i ${RANDOM_AWG_S1} SERVER_AWG_S1
 	done
@@ -584,8 +584,8 @@ function readS3AndS4() {
 	# way to set them. The sibling readers (readJminAndJmax, readS1AndS2) get
 	# away with seeding 0 only because their valid ranges start at 1 and 15,
 	# so 0 fails their guard and the loop runs.
-	SERVER_AWG_S3=""
-	SERVER_AWG_S4=""
+	SERVER_AWG_S3="${SERVER_AWG_S3:-}"
+	SERVER_AWG_S4="${SERVER_AWG_S4:-}"
 	until s_padding_in_range "${SERVER_AWG_S3}" 64; do
 		read -rp "Server AmneziaWG S3 padding [0-64, 0 disables]: " -e -i "${RANDOM_AWG_S3}" SERVER_AWG_S3
 	done
@@ -595,12 +595,15 @@ function readS3AndS4() {
 }
 
 function readIParams() {
+	if [[ -n ${SERVER_AWG_I1+x} && -n ${SERVER_AWG_I2+x} && -n ${SERVER_AWG_I3+x} && -n ${SERVER_AWG_I4+x} && -n ${SERVER_AWG_I5+x} ]]; then
+		return
+	fi
 	echo "AWG2 I1-I5 signatures are optional. Leave them empty unless your deployment has chosen values."
-	read -rp "AmneziaWG I1 (optional): " SERVER_AWG_I1
-	read -rp "AmneziaWG I2 (optional): " SERVER_AWG_I2
-	read -rp "AmneziaWG I3 (optional): " SERVER_AWG_I3
-	read -rp "AmneziaWG I4 (optional): " SERVER_AWG_I4
-	read -rp "AmneziaWG I5 (optional): " SERVER_AWG_I5
+	[[ -n ${SERVER_AWG_I1+x} ]] || read -rp "AmneziaWG I1 (optional): " SERVER_AWG_I1
+	[[ -n ${SERVER_AWG_I2+x} ]] || read -rp "AmneziaWG I2 (optional): " SERVER_AWG_I2
+	[[ -n ${SERVER_AWG_I3+x} ]] || read -rp "AmneziaWG I3 (optional): " SERVER_AWG_I3
+	[[ -n ${SERVER_AWG_I4+x} ]] || read -rp "AmneziaWG I4 (optional): " SERVER_AWG_I4
+	[[ -n ${SERVER_AWG_I5+x} ]] || read -rp "AmneziaWG I5 (optional): " SERVER_AWG_I5
 }
 
 function ipv4_tunnel_in_use() {
@@ -723,13 +726,16 @@ function installQuestions() {
 		echo ""
 	fi
 
-	# Detect public IPv4 or IPv6 address and pre-fill for the user
-	SERVER_PUB_IP=$(ip -4 addr | sed -ne 's|^.* inet \([^/]*\)/.* scope global.*$|\1|p' | awk '{print $1}' | head -1)
-	if [[ -z ${SERVER_PUB_IP} ]]; then
-		# Detect public IPv6 address
-		SERVER_PUB_IP=$(ip -6 addr | sed -ne 's|^.* inet6 \([^/]*\)/.* scope global.*$|\1|p' | head -1)
+	# Detect public IPv4 or IPv6 address and pre-fill for the user, unless the
+	# caller already exported one (non-interactive install).
+	if [[ -z ${SERVER_PUB_IP:-} ]]; then
+		SERVER_PUB_IP=$(ip -4 addr | sed -ne 's|^.* inet \([^/]*\)/.* scope global.*$|\1|p' | awk '{print $1}' | head -1)
+		if [[ -z ${SERVER_PUB_IP} ]]; then
+			# Detect public IPv6 address
+			SERVER_PUB_IP=$(ip -6 addr | sed -ne 's|^.* inet6 \([^/]*\)/.* scope global.*$|\1|p' | head -1)
+		fi
+		read -rp "Public IPv4 or IPv6 address or domain: " -e -i "${SERVER_PUB_IP}" SERVER_PUB_IP
 	fi
-	read -rp "Public IPv4 or IPv6 address or domain: " -e -i "${SERVER_PUB_IP}" SERVER_PUB_IP
 
 	# Detect public interface and pre-fill for the user
 	SERVER_NIC="$(ip -4 route ls | grep default | grep -Po '(?<=dev )(\S+)' | head -1)"
@@ -861,7 +867,9 @@ function installQuestions() {
 	echo "  New clients directory: ${AWG_CLIENTS_DIR}"
 	echo ""
 	validate_installation_choices || exit 1
-	read -rp "Type INSTALL-AWG2 to confirm these changes: " INSTALL_CONFIRMATION
+	if [[ -z ${INSTALL_CONFIRMATION:-} ]]; then
+		read -rp "Type INSTALL-AWG2 to confirm these changes: " INSTALL_CONFIRMATION
+	fi
 	if [[ ${INSTALL_CONFIRMATION} != INSTALL-AWG2 ]]; then
 		echo "Installation cancelled; no configuration changes were made."
 		exit 0
@@ -1359,6 +1367,33 @@ function manageMenu() {
 	esac
 }
 
+# ---------------------------------------------------------------------------
+# Non-interactive installs
+#
+# Every prompt is skipped when its variable is already exported, so a scripted
+# install sets what it cares about and lets the installer randomise the rest.
+# Do NOT drive this by piping answers on stdin: `read -e -i` does not apply its
+# default on a non-tty, a blank line leaves the variable empty and spins the
+# until-loop forever, and any change to the prompt count silently desyncs every
+# later answer (observed 2026-08-09 — an install cancelled because the
+# confirmation was consumed by the I5 prompt).
+#
+# Side-by-side AWG2 on an existing legacy node:
+#
+#   export INSTALL_ALONGSIDE=y
+#   export SERVER_PUB_IP=203.0.113.10 SERVER_PUB_NIC=eth0
+#   export SERVER_AWG_NIC=awg1 SERVER_PORT=8081
+#   export SERVER_AWG_IPV4=10.67.67.1 SERVER_AWG_IPV6=fd43:43:43::1
+#   export CLIENT_DNS_1=1.1.1.1 CLIENT_DNS_2=1.0.0.1 ALLOWED_IPS='0.0.0.0/0,::/0'
+#   export SERVER_AWG_I1= SERVER_AWG_I2= SERVER_AWG_I3= SERVER_AWG_I4= SERVER_AWG_I5=
+#   export INSTALL_CONFIRMATION=INSTALL-AWG2
+#   AWG_PROFILE=awg2 ./amneziawg-install.sh
+#
+# Anything left unset is prompted for interactively, or randomised where the
+# installer generates a default (Jc, S1-S4, H1-H4, port). Exporting an I value
+# as empty means "deliberately none" and suppresses that prompt.
+# ---------------------------------------------------------------------------
+
 # Allow the validation suite to source the pure parameter helpers without
 # running package installation or changing the host.
 if [[ ${AMNEZIAWG_INSTALLER_LIB_ONLY:-0} == "1" ]]; then
@@ -1381,7 +1416,9 @@ fi
 if ((LEGACY_AWG_DETECTED == 1)); then
 	print_existing_awg_summary
 	echo "This installer can add AWG2 alongside the legacy installation using isolated resources."
-	read -rp "Continue with a side-by-side AWG2 installation? [y/N]: " INSTALL_ALONGSIDE
+	if [[ -z ${INSTALL_ALONGSIDE:-} ]]; then
+		read -rp "Continue with a side-by-side AWG2 installation? [y/N]: " INSTALL_ALONGSIDE
+	fi
 	INSTALL_ALONGSIDE=${INSTALL_ALONGSIDE:-N}
 	if [[ ! ${INSTALL_ALONGSIDE} =~ ^[Yy]$ ]]; then
 		if [[ -e ${AMNEZIAWG_DIR}/params ]]; then
