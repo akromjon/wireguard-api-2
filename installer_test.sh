@@ -111,6 +111,24 @@ printf '%s\n' '# CHOP-AWG-PROFILE: awg2' 'S3 = 0' >>"${AMNEZIAWG_DIR}/awg0.conf"
 detect_existing_awg_installations
 [[ ${AWG2_DETECTED} == 1 ]] || fail "AWG2 marker should be detected"
 
+# Adding a padded AWG2 interface beside an unpadded one: the incumbent is AWG2,
+# so nothing matches the legacy profile. It still keeps serving its peers, so
+# its real config path and port must be carried into the coexistence context —
+# not left empty, and not defaulted to a guessed awg0.conf.
+(
+	SERVER_AWG_NIC=awg1
+	unset LEGACY_WG_CONFIG_FILE LEGACY_SERVER_PORT
+	configure_installation_layout
+	[[ ${SERVER_PARAMS_FILE} == "${AMNEZIAWG_DIR}/params.awg1" ]] ||
+		fail "second AWG2 interface must get its own params file, got ${SERVER_PARAMS_FILE}"
+	[[ ${LEGACY_WG_CONFIG_FILE:-} == "${AMNEZIAWG_DIR}/awg0.conf" ]] ||
+		fail "incumbent AWG2 config path must be recorded, got ${LEGACY_WG_CONFIG_FILE:-<empty>}"
+	[[ ${LEGACY_SERVER_PORT:-} == 443 ]] ||
+		fail "incumbent AWG2 port must be recorded, got ${LEGACY_SERVER_PORT:-<empty>}"
+	[[ ${REUSE_EXISTING_API} == 1 ]] ||
+		fail "coexistence install must reuse the running node API"
+) || exit 1
+
 WIREGUARD_API_SERVICE_LIB_ONLY=1
 AWG_INTERFACE=awg1
 CONFIG_DIR="${TEST_AWG_DIR}/wireguard-api"

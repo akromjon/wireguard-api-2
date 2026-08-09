@@ -646,6 +646,15 @@ function configure_installation_layout() {
 				break
 			fi
 		done
+		# Adding AWG2 beside an existing AWG2 interface (how S3/S4 padding is
+		# introduced without invalidating configs already issued to clients)
+		# leaves no legacy row to match, but the incumbent interface still keeps
+		# serving its peers and must be recorded as the one that stays up.
+		if [[ -z ${LEGACY_WG_CONFIG_FILE:-} ]] && ((${#EXISTING_AWG_SUMMARIES[@]} > 0)); then
+			IFS='|' read -r interface profile port config <<<"${EXISTING_AWG_SUMMARIES[0]}"
+			LEGACY_WG_CONFIG_FILE="${config}"
+			LEGACY_SERVER_PORT="${port}"
+		fi
 		LEGACY_WG_CONFIG_FILE=${LEGACY_WG_CONFIG_FILE:-${AMNEZIAWG_DIR}/awg0.conf}
 		if [[ -f ${API_CONFIG_DIR}/.env ]]; then
 			API_PORT=$(awk -F= '/^API_PORT=/ {gsub(/["[:space:]]|\047/, "", $2); print $2; exit}' "${API_CONFIG_DIR}/.env")
@@ -1378,7 +1387,10 @@ function manageMenu() {
 # later answer (observed 2026-08-09 — an install cancelled because the
 # confirmation was consumed by the I5 prompt).
 #
-# Side-by-side AWG2 on an existing legacy node:
+# Side-by-side AWG2, either on a legacy node or beside an existing AWG2
+# interface (the latter is how S3/S4 padding is added to a node installed
+# without it — the padding values live in every issued client config, so they
+# cannot be raised on an interface that is already serving peers):
 #
 #   export INSTALL_ALONGSIDE=y
 #   export SERVER_PUB_IP=203.0.113.10 SERVER_PUB_NIC=eth0
@@ -1409,8 +1421,21 @@ initialCheck
 detect_existing_awg_installations
 if ((AWG2_DETECTED == 1)); then
 	print_existing_awg_summary
-	echo "An AWG2 interface is already configured on this host. No changes were made."
-	exit 0
+	echo "This host already has an AWG2 interface."
+	echo "A second AWG2 interface can be added beside it using isolated resources"
+	echo "(its own interface, port, subnet and params file). That is how S3/S4"
+	echo "padding is introduced: the padding values are written into every client"
+	echo "config, so raising them on a serving interface would break every config"
+	echo "already issued. The existing interface keeps running untouched."
+	# Default stays "manage, don't duplicate": a bare rerun changes nothing.
+	# Only a deliberate INSTALL_ALONGSIDE=y (or an interactive yes) proceeds.
+	if [[ -z ${INSTALL_ALONGSIDE:-} ]] && [[ -t 0 ]]; then
+		read -rp "Continue with a side-by-side AWG2 installation? [y/N]: " INSTALL_ALONGSIDE
+	fi
+	if [[ ! ${INSTALL_ALONGSIDE:-N} =~ ^[Yy]$ ]]; then
+		echo "No changes were made."
+		exit 0
+	fi
 fi
 
 if ((LEGACY_AWG_DETECTED == 1)); then
