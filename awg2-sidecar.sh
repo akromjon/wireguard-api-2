@@ -19,6 +19,7 @@ NEW_PORT=8081
 NEW_IPV4=10.67.67.1
 NEW_IPV6=fd43:43:43::1
 APPLY=0
+INSTALL_TIMEOUT=900
 SRC_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
 while [[ $# -gt 0 ]]; do
@@ -76,6 +77,8 @@ AWG0_PEERS_BEFORE=$(${S} awg show "${CUR_IFACE}" peers | wc -l | tr -d ' ')
 PUB_IP=$(${S} grep -E '^SERVER_PUB_IP=' /etc/amnezia/amneziawg/params | cut -d= -f2-)
 PUB_NIC=$(${S} grep -E '^SERVER_PUB_NIC=' /etc/amnezia/amneziawg/params | cut -d= -f2-)
 [[ -n ${PUB_IP} && -n ${PUB_NIC} ]] || die "could not read SERVER_PUB_IP / SERVER_PUB_NIC from params"
+API_PORT_EXISTING=$(${S} grep -E '^API_PORT=' /etc/wireguard-api/.env | cut -d= -f2- | tr -d '"')
+API_PORT_EXISTING=${API_PORT_EXISTING:-8080}
 
 cat <<PLAN
 
@@ -83,7 +86,7 @@ Plan for $(hostname):
   keep      ${CUR_IFACE} running with ${AWG0_PEERS_BEFORE} peers (nobody disconnected)
   create    ${NEW_IFACE} on UDP ${NEW_PORT}, tunnel ${NEW_IPV4} / ${NEW_IPV6}
   public    ${PUB_IP} via ${PUB_NIC}
-  padding   S3/S4 randomised per node by the installer
+  padding   S3/S4 randomised per node by this script
   after     backend cutover with --configs=${AWG0_PEERS_BEFORE}
 
 PLAN
@@ -111,6 +114,35 @@ echo "  ${BACKUP}"
 say "Installing ${NEW_IFACE} (this takes a few minutes — DKMS build)"
 [[ -r ${SRC_DIR}/amneziawg-install.sh ]] || die "amneziawg-install.sh must sit next to this script"
 
+# EVERY prompt must be answered by an exported variable. The installer runs
+# with stdin on /dev/null, so any prompt left unset reads EOF, keeps its empty
+# value, and spins its until-loop forever at 100% CPU — this hung a node for 21
+# minutes on 2026-08-09 because Jc/S1/S2/H1-H4 were left to the installer's own
+# randomiser. Generate them here instead: partial coverage is not
+# non-interactive.
+rand() { shuf -i"$1"-"$2" -n1; }
+
+AWG_JC=$(rand 3 10)
+AWG_JMIN=50
+AWG_JMAX=1000
+AWG_S1=$(rand 15 150)
+AWG_S2=$(rand 15 150)
+# The kernel module requires S1 + 56 != S2.
+while ((AWG_S1 + 56 == AWG_S2)); do AWG_S2=$(rand 15 150); done
+AWG_S3=$(rand 8 64)
+AWG_S4=$(rand 4 32)
+
+# Four non-overlapping H ranges, each 1000 wide, well separated.
+h_base=$(rand 100000000 400000000)
+AWG_H1="${h_base}-$((h_base + 1000))"
+AWG_H2="$((h_base + 300000000))-$((h_base + 300001000))"
+AWG_H3="$((h_base + 600000000))-$((h_base + 600001000))"
+AWG_H4="$((h_base + 900000000))-$((h_base + 900001000))"
+
+echo "  Jc=${AWG_JC} S1=${AWG_S1} S2=${AWG_S2} S3=${AWG_S3} S4=${AWG_S4}"
+echo "  H1=${AWG_H1}"
+echo "  H4=${AWG_H4}"
+
 cd "${SRC_DIR}"
 ${S} env \
 	AWG_PROFILE=awg2 \
@@ -125,8 +157,24 @@ ${S} env \
 	CLIENT_DNS_1=1.1.1.1 \
 	CLIENT_DNS_2=1.0.0.1 \
 	ALLOWED_IPS='0.0.0.0/0,::/0' \
+	SERVER_AWG_JC="${AWG_JC}" \
+	SERVER_AWG_JMIN="${AWG_JMIN}" \
+	SERVER_AWG_JMAX="${AWG_JMAX}" \
+	SERVER_AWG_S1="${AWG_S1}" \
+	SERVER_AWG_S2="${AWG_S2}" \
+	SERVER_AWG_S3="${AWG_S3}" \
+	SERVER_AWG_S4="${AWG_S4}" \
+	SERVER_AWG_H1="${AWG_H1}" \
+	SERVER_AWG_H2="${AWG_H2}" \
+	SERVER_AWG_H3="${AWG_H3}" \
+	SERVER_AWG_H4="${AWG_H4}" \
+	API_PORT="${API_PORT_EXISTING}" \
 	SERVER_AWG_I1= SERVER_AWG_I2= SERVER_AWG_I3= SERVER_AWG_I4= SERVER_AWG_I5= \
-	bash ./amneziawg-install.sh </dev/null || die "installer exited non-zero"
+	timeout "${INSTALL_TIMEOUT}" bash ./amneziawg-install.sh </dev/null && INSTALL_RC=0 || INSTALL_RC=$?
+if [[ ${INSTALL_RC} -eq 124 ]]; then
+	die "installer exceeded ${INSTALL_TIMEOUT}s and was killed — it was almost certainly spinning on an unanswered prompt. ${CUR_IFACE} is untouched; nothing to roll back."
+fi
+[[ ${INSTALL_RC} -eq 0 ]] || die "installer exited ${INSTALL_RC}"
 
 # --- 4. Assert ------------------------------------------------------------
 say "Verifying"
@@ -145,9 +193,30 @@ check "AWG_PROFILE" "$(${S} grep -E '^AWG_PROFILE=' ${ENV} | cut -d= -f2-)" "awg
 check "WG_CONFIG_FILE" "$(${S} grep -E '^WG_CONFIG_FILE=' ${ENV} | cut -d= -f2-)" "/etc/amnezia/amneziawg/${NEW_IFACE}.conf"
 check "WG_PARAMS_FILE" "$(${S} grep -E '^WG_PARAMS_FILE=' ${ENV} | cut -d= -f2-)" "/etc/amnezia/amneziawg/params.${NEW_IFACE}"
 
-# The installer does not abort when apt is locked; without this assert a node
-# can end up running AWG2 config on the old 1.0 kernel module.
-check "kernel module" "$(cat /sys/module/amneziawg/version 2>/dev/null)" "3.0.20260805"
+# The installer does not abort when apt is locked, so assert the package
+# actually upgraded — that is the failure this catches (a node left running
+# AWG2 config against packages that never moved).
+#
+# Assert the ON-DISK module, not the loaded one. During a side-by-side install
+# the running legacy interface pins the old module in the kernel, so
+# /sys/module/amneziawg/version legitimately lags until awg0 is torn down. The
+# loaded module still serves awg1 correctly: verified on 278 Stockholm, where a
+# 1.0.20260611 module completed an AWG2 handshake in 100ms and round-tripped
+# transport traffic with S4=15 padding intact. Version strings do not track
+# capability here — do not assert on them.
+DISK_MODULE=$(modinfo amneziawg 2>/dev/null | awk '/^version/ {print $2}')
+if [[ ${DISK_MODULE} == 3.* ]]; then
+	printf '  \033[0;32mOK\033[0m    on-disk module = %s\n' "${DISK_MODULE}"
+else
+	printf '  \033[0;31mBAD\033[0m   on-disk module = %s (expected 3.x — did apt actually upgrade?)\n' "${DISK_MODULE:-none}"
+	ERRORS=$((ERRORS + 1))
+fi
+LOADED_MODULE=$(cat /sys/module/amneziawg/version 2>/dev/null)
+if [[ ${LOADED_MODULE} != "${DISK_MODULE}" ]]; then
+	printf '  \033[0;33mINFO\033[0m  loaded module = %s, pinned by running %s; matches on-disk after teardown\n' \
+		"${LOADED_MODULE}" "${CUR_IFACE}"
+fi
+check "awg tools" "$(awg --version 2>/dev/null | awk '{print $2}' | cut -c1)" "v"
 check "${NEW_IFACE} service" "$(systemctl is-active "awg-quick@${NEW_IFACE}")" "active"
 check "${CUR_IFACE} service" "$(systemctl is-active "awg-quick@${CUR_IFACE}")" "active"
 check "node API" "$(systemctl is-active wireguard.service)" "active"
