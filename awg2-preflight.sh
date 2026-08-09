@@ -138,6 +138,23 @@ if [[ -r ${API_ENV} ]] || ${S} test -r ${API_ENV}; then
 	if [[ ${API_PORT} == "${NEW_PORT}" ]]; then
 		warn "node API TCP ${API_PORT} shares a number with the new UDP port (different protocols, but confusing)"
 	fi
+	# USE_UDP_443_ENDPOINT=true makes the node advertise :443 in every client
+	# config no matter what the interface actually listens on. It is a leftover
+	# from the NAT-redirect era. With awg1 on a different port the configs point
+	# at awg0, whose key does not match, so every new client silently fails to
+	# handshake while awg1 sees zero packets. Cost 3 nodes and a user-facing
+	# outage on 2026-08-09 — the install and the off-box port probe both pass,
+	# because the packets do reach the host; they just reach the wrong listener.
+	ENDPOINT_443=$(${S} awk -F= '/^USE_UDP_443_ENDPOINT=/ {gsub(/["[:space:]]/, "", $2); print $2; exit}' ${API_ENV} 2>/dev/null)
+	if [[ ${ENDPOINT_443} == "true" && ${NEW_PORT} != "443" ]]; then
+		fail "USE_UDP_443_ENDPOINT=true but the new interface will listen on ${NEW_PORT}"
+		echo "          Every config generated for ${NEW_IFACE} would advertise :443 and hit the"
+		echo "          old interface instead. Set USE_UDP_443_ENDPOINT=false in ${API_ENV}"
+		echo "          and restart wireguard.service before installing."
+	else
+		pass "endpoint port advertised to clients follows the real listener"
+	fi
+
 	SVC=$(systemctl is-active wireguard.service 2>/dev/null)
 	if [[ ${SVC} == active ]]; then
 		pass "wireguard.service active"
@@ -174,5 +191,11 @@ echo "  UDP ${NEW_PORT} must be reachable through the provider firewall."
 echo "    on this node:  tcpdump -ni any 'udp port ${NEW_PORT}' -c 3"
 echo "    from anywhere: printf probe | nc -u -w1 \$(hostname -I | awk '{print \$1}') ${NEW_PORT}"
 echo "  IONOS blocks UDP ${NEW_PORT} by default and needs its firewall opened first."
+echo
+echo "  NOTE: tcpdump captures at the device layer. Seeing the probe packets proves"
+echo "  only that they reach the HOST — not that they reach ${NEW_IFACE}'s socket, and"
+echo "  not that clients are even told the right port. The only end-to-end proof is"
+echo "  a rising handshake count after the interface goes live:"
+echo "    awg show ${NEW_IFACE} latest-handshakes | awk '\$2>0' | wc -l"
 echo
 echo "SUMMARY ok=yes fails=0 warns=${WARN} iface=${CUR_IFACE} port=${CUR_PORT} awg0_peers=${AWG0_PEERS} module=${MOD_LOADED}"
