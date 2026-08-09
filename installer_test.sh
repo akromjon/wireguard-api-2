@@ -14,6 +14,35 @@ if grep -q 'while (( ${RANDOM_AWG_H1}' "${SCRIPT_DIR}/amneziawg-install.sh"; the
 	fail "legacy arithmetic comparison must not process H ranges"
 fi
 
+# S3/S4 regression guard. 0 is a VALID answer (it disables the padding), so
+# seeding the variable with 0 satisfies the until-guard immediately and the
+# operator is never prompted — S3/S4 silently forced to 0 with no way to set
+# them. Seeding must stay non-numeric.
+if grep -qE '^\tSERVER_AWG_S(3|4)=0$' "${SCRIPT_DIR}/amneziawg-install.sh"; then
+	fail "readS3AndS4 must not seed S3/S4 with 0 — the prompt would be skipped"
+fi
+
+s_padding_in_range "0" 64 || fail "S3=0 must be accepted (disables padding)"
+s_padding_in_range "16" 64 || fail "S3=16 must be accepted"
+s_padding_in_range "64" 64 || fail "S3 upper bound must be accepted"
+s_padding_in_range "8" 32 || fail "S4=8 must be accepted"
+s_padding_in_range "32" 32 || fail "S4 upper bound must be accepted"
+if s_padding_in_range "65" 64; then
+	fail "S3 above 64 must be rejected"
+fi
+if s_padding_in_range "33" 32; then
+	fail "S4 above 32 must be rejected"
+fi
+if s_padding_in_range "" 64; then
+	fail "empty seed must be rejected so the prompt actually runs"
+fi
+if s_padding_in_range "abc" 64; then
+	fail "non-numeric input must be rejected"
+fi
+if s_padding_in_range "-1" 64; then
+	fail "negative padding must be rejected"
+fi
+
 h_spec_bounds "5" || fail "single H value should be valid"
 h_spec_bounds "5-10" || fail "H range should be valid"
 if h_spec_bounds "4"; then

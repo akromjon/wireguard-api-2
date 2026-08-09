@@ -225,7 +225,7 @@ function h_specs_overlap() {
 			h_spec_bounds "${specs[j]}" || return 0
 			low2=${H_SPEC_LOW}
 			high2=${H_SPEC_HIGH}
-			if (( low1 <= high2 && low2 <= high1 )); then
+			if ((low1 <= high2 && low2 <= high1)); then
 				return 0
 			fi
 		done
@@ -319,12 +319,12 @@ function checkPackageAvailability() {
 function installPackagesFromNoble() {
 	echo -e "${ORANGE}Packages not available for current Ubuntu version. Attempting to install from Ubuntu 24.04 (noble)...${NC}"
 	echo -e "${ORANGE}Warning: This is a workaround and may have compatibility risks.${NC}"
-	
+
 	# Add GPG key for the repository (same key as the main PPA)
 	# Key ID: 57290828 (full: 4166F2C257290828)
 	echo -e "${YELLOW}Adding GPG key for Amnezia PPA...${NC}"
 	mkdir -p /etc/apt/keyrings
-	
+
 	# Try modern method first (using gpg directly)
 	if command -v gpg &>/dev/null; then
 		# Download and import the key using modern method
@@ -333,56 +333,56 @@ function installPackagesFromNoble() {
 			gpg --no-default-keyring --keyring /etc/apt/keyrings/amnezia-ppa.gpg --keyserver keyserver.ubuntu.com --recv-keys 57290828 2>/dev/null || true
 		}
 	fi
-	
+
 	# Fallback to deprecated apt-key method if modern method failed
 	if [[ ! -f /etc/apt/keyrings/amnezia-ppa.gpg ]]; then
 		if command -v apt-key &>/dev/null; then
 			apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 57290828 2>/dev/null || true
 		fi
 	fi
-	
+
 	# Add noble repository with proper GPG key configuration
 	NOBLE_SOURCE="/etc/apt/sources.list.d/amneziawg-noble.list"
 	if [[ ! -f "${NOBLE_SOURCE}" ]]; then
 		# Use signed-by if keyring exists, otherwise unsigned (will need --allow-unauthenticated)
 		if [[ -f /etc/apt/keyrings/amnezia-ppa.gpg ]]; then
-			echo "deb [signed-by=/etc/apt/keyrings/amnezia-ppa.gpg] https://ppa.launchpadcontent.net/amnezia/ppa/ubuntu noble main" > "${NOBLE_SOURCE}"
+			echo "deb [signed-by=/etc/apt/keyrings/amnezia-ppa.gpg] https://ppa.launchpadcontent.net/amnezia/ppa/ubuntu noble main" >"${NOBLE_SOURCE}"
 			echo -e "${GREEN}Added noble repository with GPG key${NC}"
 		else
 			# Unsigned - we'll use --allow-unauthenticated when installing
-			echo "deb https://ppa.launchpadcontent.net/amnezia/ppa/ubuntu noble main" > "${NOBLE_SOURCE}"
+			echo "deb https://ppa.launchpadcontent.net/amnezia/ppa/ubuntu noble main" >"${NOBLE_SOURCE}"
 			echo -e "${ORANGE}Added noble repository without GPG key (will use --allow-unauthenticated)${NC}"
 		fi
 	fi
-	
+
 	# Update package lists - force update even if repository is unsigned
 	echo -e "${YELLOW}Updating package lists...${NC}"
 	local APT_UPDATE_OUTPUT
 	local GPG_ISSUE=false
-	
+
 	# Try normal update first
 	APT_UPDATE_OUTPUT=$(apt update 2>&1)
 	echo "${APT_UPDATE_OUTPUT}"
-	
+
 	# Check if GPG key issue occurred
 	if echo "${APT_UPDATE_OUTPUT}" | grep -q "NO_PUBKEY\|not signed"; then
 		GPG_ISSUE=true
 		echo -e "${ORANGE}GPG key issue detected. Forcing update with --allow-insecure-repositories...${NC}"
-		
+
 		# Force update with insecure repositories flag
 		APT_UPDATE_OUTPUT=$(apt update --allow-insecure-repositories 2>&1)
 		echo "${APT_UPDATE_OUTPUT}"
-		
+
 		# If still failing, try with Acquire::AllowInsecureRepositories
 		if echo "${APT_UPDATE_OUTPUT}" | grep -q "not signed\|NO_PUBKEY"; then
 			echo -e "${ORANGE}Using apt configuration workaround...${NC}"
 			# Create temporary apt config to allow insecure repos
 			mkdir -p /etc/apt/apt.conf.d
-			echo 'Acquire::AllowInsecureRepositories "true";' > /etc/apt/apt.conf.d/99allow-insecure-temp.conf
-			echo 'APT::Get::AllowUnauthenticated "true";' >> /etc/apt/apt.conf.d/99allow-insecure-temp.conf
+			echo 'Acquire::AllowInsecureRepositories "true";' >/etc/apt/apt.conf.d/99allow-insecure-temp.conf
+			echo 'APT::Get::AllowUnauthenticated "true";' >>/etc/apt/apt.conf.d/99allow-insecure-temp.conf
 			APT_UPDATE_OUTPUT=$(apt update 2>&1)
 			echo "${APT_UPDATE_OUTPUT}"
-			
+
 			# Verify update succeeded (check if we got packages from noble)
 			if echo "${APT_UPDATE_OUTPUT}" | grep -q "noble.*InRelease\|Get:.*noble"; then
 				echo -e "${GREEN}Successfully updated package lists from noble repository${NC}"
@@ -391,11 +391,11 @@ function installPackagesFromNoble() {
 			fi
 		fi
 	fi
-	
+
 	# Check what's already installed and what we need from noble
 	local NEED_DKMS=false
 	local NEED_TOOLS=true
-	
+
 	# Check if amneziawg-dkms is already installed
 	if dpkg -l | grep -q "^ii.*amneziawg-dkms\|^ii.*amneziawg "; then
 		echo -e "${GREEN}amneziawg-dkms or amneziawg is already installed${NC}"
@@ -403,13 +403,13 @@ function installPackagesFromNoble() {
 	else
 		NEED_DKMS=true
 	fi
-	
+
 	# Check if amneziawg-tools is already installed
 	if command -v awg &>/dev/null; then
 		echo -e "${GREEN}amneziawg-tools is already installed${NC}"
 		NEED_TOOLS=false
 	fi
-	
+
 	# Only install dkms if needed
 	if [[ "${NEED_DKMS}" == "true" ]]; then
 		echo -e "${YELLOW}Installing amneziawg-dkms from noble...${NC}"
@@ -419,11 +419,11 @@ function installPackagesFromNoble() {
 			fi
 		fi
 	fi
-	
+
 	# Install amneziawg-tools from noble (this is why we're here)
 	if [[ "${NEED_TOOLS}" == "true" ]]; then
 		echo -e "${YELLOW}Installing amneziawg-tools from noble...${NC}"
-		
+
 		# Check if package is available in noble repository
 		echo -e "${YELLOW}Checking package availability...${NC}"
 		local PACKAGE_FOUND=false
@@ -443,16 +443,16 @@ function installPackagesFromNoble() {
 				echo -e "${ORANGE}This may mean the package list wasn't updated properly or the package doesn't exist.${NC}"
 			fi
 		fi
-		
+
 		if [[ "${PACKAGE_FOUND}" == "false" ]]; then
 			# Clean up temporary apt config
 			rm -f /etc/apt/apt.conf.d/99allow-insecure-temp.conf 2>/dev/null || true
 			return 1
 		fi
-		
+
 		# Try multiple installation methods due to GPG key issues
 		local INSTALL_SUCCESS=false
-		
+
 		# Method 1: Normal installation
 		if apt install -y amneziawg-tools 2>/dev/null; then
 			INSTALL_SUCCESS=true
@@ -468,20 +468,20 @@ function installPackagesFromNoble() {
 				INSTALL_SUCCESS=true
 			fi
 		fi
-		
+
 		if [[ "${INSTALL_SUCCESS}" == "false" ]]; then
 			echo -e "${RED}Failed to install amneziawg-tools from noble${NC}"
 			# Clean up temporary apt config
 			rm -f /etc/apt/apt.conf.d/99allow-insecure-temp.conf 2>/dev/null || true
 			return 1
 		fi
-		
+
 		echo -e "${GREEN}Successfully installed amneziawg-tools${NC}"
 	fi
-	
+
 	# Clean up temporary apt config
 	rm -f /etc/apt/apt.conf.d/99allow-insecure-temp.conf 2>/dev/null || true
-	
+
 	echo -e "${GREEN}Successfully installed packages from Ubuntu 24.04 (noble)${NC}"
 	return 0
 }
@@ -495,10 +495,10 @@ function initialCheck() {
 function readJminAndJmax() {
 	SERVER_AWG_JMIN=0
 	SERVER_AWG_JMAX=0
-	until [[ ${SERVER_AWG_JMIN} =~ ^[0-9]+$ ]] && (( ${SERVER_AWG_JMIN} >= 1 )) && (( ${SERVER_AWG_JMIN} <= 1280 )); do
+	until [[ ${SERVER_AWG_JMIN} =~ ^[0-9]+$ ]] && ((${SERVER_AWG_JMIN} >= 1)) && ((${SERVER_AWG_JMIN} <= 1280)); do
 		read -rp "Server AmneziaWG Jmin [1-1280]: " -e -i 50 SERVER_AWG_JMIN
 	done
-	until [[ ${SERVER_AWG_JMAX} =~ ^[0-9]+$ ]] && (( ${SERVER_AWG_JMAX} >= 1 )) && (( ${SERVER_AWG_JMAX} <= 1280 )); do
+	until [[ ${SERVER_AWG_JMAX} =~ ^[0-9]+$ ]] && ((${SERVER_AWG_JMAX} >= 1)) && ((${SERVER_AWG_JMAX} <= 1280)); do
 		read -rp "Server AmneziaWG Jmax [1-1280]: " -e -i 1000 SERVER_AWG_JMAX
 	done
 }
@@ -511,10 +511,10 @@ function generateS1AndS2() {
 function readS1AndS2() {
 	SERVER_AWG_S1=0
 	SERVER_AWG_S2=0
-	until [[ ${SERVER_AWG_S1} =~ ^[0-9]+$ ]] && (( ${SERVER_AWG_S1} >= 15 )) && (( ${SERVER_AWG_S1} <= 150 )); do
+	until [[ ${SERVER_AWG_S1} =~ ^[0-9]+$ ]] && ((${SERVER_AWG_S1} >= 15)) && ((${SERVER_AWG_S1} <= 150)); do
 		read -rp "Server AmneziaWG S1 [15-150]: " -e -i ${RANDOM_AWG_S1} SERVER_AWG_S1
 	done
-	until [[ ${SERVER_AWG_S2} =~ ^[0-9]+$ ]] && (( ${SERVER_AWG_S2} >= 15 )) && (( ${SERVER_AWG_S2} <= 150 )); do
+	until [[ ${SERVER_AWG_S2} =~ ^[0-9]+$ ]] && ((${SERVER_AWG_S2} >= 15)) && ((${SERVER_AWG_S2} <= 150)); do
 		read -rp "Server AmneziaWG S2 [15-150]: " -e -i ${RANDOM_AWG_S2} SERVER_AWG_S2
 	done
 }
@@ -553,13 +553,28 @@ function readH1AndH2AndH3AndH4() {
 	done
 }
 
+# Validates an S3/S4 padding answer. Extracted so the prompt guard is
+# testable without driving an interactive read.
+function s_padding_in_range() {
+	local value=$1 max=$2
+	[[ ${value} =~ ^[0-9]+$ ]] && ((value <= max))
+}
+
 function readS3AndS4() {
-	SERVER_AWG_S3=0
-	SERVER_AWG_S4=0
-	until [[ ${SERVER_AWG_S3} =~ ^[0-9]+$ ]] && (( SERVER_AWG_S3 <= 64 )); do
+	# Seed with an EMPTY sentinel, not 0.
+	#
+	# 0 is a legitimate answer here (it disables the padding), so seeding 0
+	# satisfies the guard immediately and the until-loop never runs — the
+	# operator is never prompted and S3/S4 are silently forced to 0 with no
+	# way to set them. The sibling readers (readJminAndJmax, readS1AndS2) get
+	# away with seeding 0 only because their valid ranges start at 1 and 15,
+	# so 0 fails their guard and the loop runs.
+	SERVER_AWG_S3=""
+	SERVER_AWG_S4=""
+	until s_padding_in_range "${SERVER_AWG_S3}" 64; do
 		read -rp "Server AmneziaWG S3 padding [0-64, 0 disables]: " -e -i 0 SERVER_AWG_S3
 	done
-	until [[ ${SERVER_AWG_S4} =~ ^[0-9]+$ ]] && (( SERVER_AWG_S4 <= 32 )); do
+	until s_padding_in_range "${SERVER_AWG_S4}" 32; do
 		read -rp "Server AmneziaWG S4 padding [0-32, 0 disables]: " -e -i 0 SERVER_AWG_S4
 	done
 }
@@ -746,7 +761,7 @@ function installQuestions() {
 		echo "Reusing the existing node management API on TCP ${API_PORT}."
 	else
 		DEFAULT_API_PORT=$(suggest_api_port)
-		until [[ ${API_PORT} =~ ^[0-9]+$ ]] && (( API_PORT >= 1 && API_PORT <= 65535 )) && ! tcp_port_in_use "${API_PORT}"; do
+		until [[ ${API_PORT} =~ ^[0-9]+$ ]] && ((API_PORT >= 1 && API_PORT <= 65535)) && ! tcp_port_in_use "${API_PORT}"; do
 			read -rp "AWG2 node API TCP port [1-65535]: " -e -i "${DEFAULT_API_PORT}" API_PORT
 			if [[ ${API_PORT} =~ ^[0-9]+$ ]] && tcp_port_in_use "${API_PORT}"; then
 				echo "TCP port ${API_PORT} is already assigned or listening. Choose another API port."
@@ -775,7 +790,7 @@ function installQuestions() {
 
 	# Jc
 	RANDOM_AWG_JC=$(shuf -i3-10 -n1)
-	until [[ ${SERVER_AWG_JC} =~ ^[0-9]+$ ]] && (( ${SERVER_AWG_JC} >= 1 )) && (( ${SERVER_AWG_JC} <= 128 )); do
+	until [[ ${SERVER_AWG_JC} =~ ^[0-9]+$ ]] && ((${SERVER_AWG_JC} >= 1)) && ((${SERVER_AWG_JC} <= 128)); do
 		read -rp "Server AmneziaWG Jc [1-128]: " -e -i ${RANDOM_AWG_JC} SERVER_AWG_JC
 	done
 
@@ -788,11 +803,11 @@ function installQuestions() {
 
 	# S1 && S2
 	generateS1AndS2
-	while (( ${RANDOM_AWG_S1} + 56 == ${RANDOM_AWG_S2} )); do
+	while ((${RANDOM_AWG_S1} + 56 == ${RANDOM_AWG_S2})); do
 		generateS1AndS2
 	done
 	readS1AndS2
-	while (( ${SERVER_AWG_S1} + 56 == ${SERVER_AWG_S2} )); do
+	while ((${SERVER_AWG_S1} + 56 == ${SERVER_AWG_S2})); do
 		echo "AmneziaWG require S1 + 56 <> S2"
 		readS1AndS2
 	done
@@ -857,14 +872,14 @@ function installAmneziaWG() {
 		apt update
 		# Install DKMS and build tools if not already installed
 		apt install -y dkms build-essential "linux-headers-$(uname -r)"
-		
+
 		# Check if packages are available for current Ubuntu version
 		PACKAGES_AVAILABLE=true
 		if ! checkPackageAvailability "amneziawg-tools"; then
 			PACKAGES_AVAILABLE=false
 			echo -e "${ORANGE}amneziawg-tools not available for current Ubuntu version${NC}"
 		fi
-		
+
 		# Try to install packages
 		if [[ "${PACKAGES_AVAILABLE}" == "true" ]]; then
 			# Try to install amneziawg-dkms if available, otherwise fall back to amneziawg
@@ -880,7 +895,7 @@ function installAmneziaWG() {
 				fi
 			fi
 		fi
-		
+
 		# If packages not available or installation failed, try installing from Ubuntu 24.04 (noble)
 		if [[ "${PACKAGES_AVAILABLE}" == "false" ]]; then
 			if ! installPackagesFromNoble; then
@@ -888,7 +903,7 @@ function installAmneziaWG() {
 				exit 1
 			fi
 		fi
-		
+
 		# Verify installation
 		if ! command -v awg &>/dev/null; then
 			echo -e "${RED}Error: awg command not found after installation. Installation failed.${NC}"
@@ -981,11 +996,11 @@ H2 = ${SERVER_AWG_H2}
 H3 = ${SERVER_AWG_H3}
 H4 = ${SERVER_AWG_H4}" >"${SERVER_AWG_CONF}"
 
-[[ -n ${SERVER_AWG_I1} ]] && echo "I1 = ${SERVER_AWG_I1}" >>"${SERVER_AWG_CONF}"
-[[ -n ${SERVER_AWG_I2} ]] && echo "I2 = ${SERVER_AWG_I2}" >>"${SERVER_AWG_CONF}"
-[[ -n ${SERVER_AWG_I3} ]] && echo "I3 = ${SERVER_AWG_I3}" >>"${SERVER_AWG_CONF}"
-[[ -n ${SERVER_AWG_I4} ]] && echo "I4 = ${SERVER_AWG_I4}" >>"${SERVER_AWG_CONF}"
-[[ -n ${SERVER_AWG_I5} ]] && echo "I5 = ${SERVER_AWG_I5}" >>"${SERVER_AWG_CONF}"
+	[[ -n ${SERVER_AWG_I1} ]] && echo "I1 = ${SERVER_AWG_I1}" >>"${SERVER_AWG_CONF}"
+	[[ -n ${SERVER_AWG_I2} ]] && echo "I2 = ${SERVER_AWG_I2}" >>"${SERVER_AWG_CONF}"
+	[[ -n ${SERVER_AWG_I3} ]] && echo "I3 = ${SERVER_AWG_I3}" >>"${SERVER_AWG_CONF}"
+	[[ -n ${SERVER_AWG_I4} ]] && echo "I4 = ${SERVER_AWG_I4}" >>"${SERVER_AWG_CONF}"
+	[[ -n ${SERVER_AWG_I5} ]] && echo "I5 = ${SERVER_AWG_I5}" >>"${SERVER_AWG_CONF}"
 
 	if pgrep firewalld; then
 		FIREWALLD_IPV4_ADDRESS=$(echo "${SERVER_AWG_IPV4}" | cut -d"." -f1-2)".0.0"
@@ -1032,7 +1047,7 @@ net.ipv6.conf.all.forwarding = 1" >/etc/sysctl.d/awg.conf
 
 	# Try to build and load the AmneziaWG kernel module
 	echo -e "${YELLOW}Building and loading AmneziaWG kernel module...${NC}"
-	
+
 	# Check if DKMS module exists and build it if needed
 	if command -v dkms &>/dev/null; then
 		# Check if amneziawg module is registered in DKMS
@@ -1046,14 +1061,14 @@ net.ipv6.conf.all.forwarding = 1" >/etc/sysctl.d/awg.conf
 			fi
 		fi
 	fi
-	
+
 	# Try to load the module
 	if modprobe amneziawg 2>/dev/null; then
 		echo -e "${GREEN}AmneziaWG kernel module loaded successfully${NC}"
 	else
 		echo -e "${ORANGE}Warning: Could not load AmneziaWG kernel module.${NC}"
 		echo -e "${ORANGE}Attempting to build module manually...${NC}"
-		
+
 		# Try to find and build the module source
 		MODULE_DIR=$(find /usr/src -maxdepth 1 -type d -name 'amneziawg-*' -print -quit 2>/dev/null)
 		if [[ -n "$MODULE_DIR" ]]; then
@@ -1069,7 +1084,7 @@ net.ipv6.conf.all.forwarding = 1" >/etc/sysctl.d/awg.conf
 				fi
 			fi
 		fi
-		
+
 		if ! lsmod | grep -q amneziawg; then
 			echo -e "${RED}Failed to load kernel module. You may need to reboot the server.${NC}"
 			echo -e "${ORANGE}After reboot, run: sudo modprobe amneziawg${NC}"
@@ -1089,7 +1104,7 @@ net.ipv6.conf.all.forwarding = 1" >/etc/sysctl.d/awg.conf
 	if [[ ${AWG_RUNNING} -ne 0 ]]; then
 		echo -e "\n${RED}WARNING: AmneziaWG does not seem to be running.${NC}"
 		echo -e "${ORANGE}You can check if AmneziaWG is running with: systemctl status awg-quick@${SERVER_AWG_NIC}${NC}"
-		
+
 		# Check if kernel module is loaded
 		if lsmod | grep -q amneziawg; then
 			echo -e "${ORANGE}AmneziaWG kernel module is loaded, but service failed to start.${NC}"
@@ -1097,7 +1112,7 @@ net.ipv6.conf.all.forwarding = 1" >/etc/sysctl.d/awg.conf
 		else
 			echo -e "${RED}AmneziaWG kernel module is NOT loaded!${NC}"
 			echo -e "${YELLOW}Attempting to build and load kernel module...${NC}"
-			
+
 			# Try to build DKMS module if available
 			if command -v dkms &>/dev/null; then
 				if dkms status 2>/dev/null | grep -q amneziawg; then
@@ -1108,7 +1123,7 @@ net.ipv6.conf.all.forwarding = 1" >/etc/sysctl.d/awg.conf
 					fi
 				fi
 			fi
-			
+
 			# Try to load the module
 			if modprobe amneziawg 2>/dev/null; then
 				echo -e "${GREEN}Kernel module loaded. Retrying service start...${NC}"
@@ -1135,40 +1150,40 @@ net.ipv6.conf.all.forwarding = 1" >/etc/sysctl.d/awg.conf
 		echo -e "${GREEN}You can check the status of AmneziaWG with: systemctl status awg-quick@${SERVER_AWG_NIC}\n\n${NC}"
 		echo -e "${ORANGE}If you don't have internet connectivity from your client, try to reboot the server.${NC}"
 	fi
-	
+
 	# Install the WireGuard API. On a co-located node, upgrade the existing TCP
 	# service in place and point it at the new AWG2 interface while preserving
 	# the existing API token and backend endpoint.
 	echo -e "\n${GREEN}Installing WireGuard API...${NC}"
 	if [[ ${REUSE_EXISTING_API} == 1 ]]; then
 		if ! AWG_INTERFACE="${SERVER_AWG_NIC}" \
-		INSTALL_BINARY="${API_BINARY_PATH}" \
-		CONFIG_DIR="${API_CONFIG_DIR}" \
-		SERVICE_NAME="${API_SERVICE_NAME}" \
-		API_PORT="${API_PORT}" \
-		UPGRADE_EXISTING_SERVICE=true \
-		WG_CONFIG_FILE="${SERVER_AWG_CONF}" \
-		WG_PARAMS_FILE="${SERVER_PARAMS_FILE}" \
-		WIREGUARD_CLIENTS="${AWG_CLIENTS_DIR}" \
-		bash ./service.sh; then
+			INSTALL_BINARY="${API_BINARY_PATH}" \
+			CONFIG_DIR="${API_CONFIG_DIR}" \
+			SERVICE_NAME="${API_SERVICE_NAME}" \
+			API_PORT="${API_PORT}" \
+			UPGRADE_EXISTING_SERVICE=true \
+			WG_CONFIG_FILE="${SERVER_AWG_CONF}" \
+			WG_PARAMS_FILE="${SERVER_PARAMS_FILE}" \
+			WIREGUARD_CLIENTS="${AWG_CLIENTS_DIR}" \
+			bash ./service.sh; then
 			echo -e "${RED}WireGuard API installation failed; the AWG2 migration is incomplete.${NC}" >&2
 			return 1
 		fi
 	else
 		if ! AWG_INTERFACE="${SERVER_AWG_NIC}" \
-		INSTALL_BINARY="${API_BINARY_PATH}" \
-		CONFIG_DIR="${API_CONFIG_DIR}" \
-		SERVICE_NAME="${API_SERVICE_NAME}" \
-		API_PORT="${API_PORT}" \
-		WG_CONFIG_FILE="${SERVER_AWG_CONF}" \
-		WG_PARAMS_FILE="${SERVER_PARAMS_FILE}" \
-		WIREGUARD_CLIENTS="${AWG_CLIENTS_DIR}" \
-		bash ./service.sh; then
+			INSTALL_BINARY="${API_BINARY_PATH}" \
+			CONFIG_DIR="${API_CONFIG_DIR}" \
+			SERVICE_NAME="${API_SERVICE_NAME}" \
+			API_PORT="${API_PORT}" \
+			WG_CONFIG_FILE="${SERVER_AWG_CONF}" \
+			WG_PARAMS_FILE="${SERVER_PARAMS_FILE}" \
+			WIREGUARD_CLIENTS="${AWG_CLIENTS_DIR}" \
+			bash ./service.sh; then
 			echo -e "${RED}WireGuard API installation failed; the AWG2 installation is incomplete.${NC}" >&2
 			return 1
 		fi
 	fi
-	
+
 	# Write AmneziaWG port to .env file
 	CONFIG_DIR="${API_CONFIG_DIR}"
 	if [ -f "$CONFIG_DIR/.env" ]; then
@@ -1183,7 +1198,7 @@ net.ipv6.conf.all.forwarding = 1" >/etc/sysctl.d/awg.conf
 		if grep -q "^${PORT_ENV_KEY}=" "$CONFIG_DIR/.env"; then
 			sed -i "s/^${PORT_ENV_KEY}=.*$/${PORT_ENV_KEY}=${SERVER_PORT}/" "$CONFIG_DIR/.env"
 		else
-			echo "${PORT_ENV_KEY}=${SERVER_PORT}" >> "$CONFIG_DIR/.env"
+			echo "${PORT_ENV_KEY}=${SERVER_PORT}" >>"$CONFIG_DIR/.env"
 		fi
 		echo -e "${GREEN}${PORT_ENV_KEY} (${SERVER_PORT}) written to $CONFIG_DIR/.env${NC}"
 	else
