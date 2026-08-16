@@ -62,6 +62,37 @@ done
 [[ ${AWG_S_PADDING_MIN} == 0 ]] || fail "awg2 must keep accepting S3=0"
 [[ ${INSTALL_TOKEN} == INSTALL-AWG2 ]] || fail "awg2 confirmation token must not change"
 
+# The AWG_PROFILE -> switch mapping (AWG3, AWG_S_PADDING_MIN, INSTALL_TOKEN)
+# must be exercised by sourcing with AWG_PROFILE actually exported, not by
+# hand-setting the derived variables in a subshell. A regression that leaves
+# AWG_S_PADDING_MIN=0 under awg3 would produce S3/S4 below the nonce floor —
+# a node nobody can connect to, silently — and a test that hand-sets
+# AWG_S_PADDING_MIN=12 instead of deriving it would stay green through that
+# regression.
+(
+	AWG_PROFILE=awg3
+	AMNEZIAWG_INSTALLER_LIB_ONLY=1 source "${SCRIPT_DIR}/amneziawg-install.sh"
+	[[ ${AWG3} == 1 ]] || fail "AWG_PROFILE=awg3 must derive AWG3=1"
+	[[ ${AWG_S_PADDING_MIN} == 12 ]] || fail "AWG_PROFILE=awg3 must derive AWG_S_PADDING_MIN=12"
+	[[ ${INSTALL_TOKEN} == INSTALL-AWG3 ]] || fail "AWG_PROFILE=awg3 must derive INSTALL_TOKEN=INSTALL-AWG3"
+) || exit 1
+
+(
+	AWG_PROFILE=awg2
+	AMNEZIAWG_INSTALLER_LIB_ONLY=1 source "${SCRIPT_DIR}/amneziawg-install.sh"
+	[[ ${AWG3} == 0 ]] || fail "AWG_PROFILE=awg2 must derive AWG3=0"
+	[[ ${AWG_S_PADDING_MIN} == 0 ]] || fail "AWG_PROFILE=awg2 must derive AWG_S_PADDING_MIN=0"
+	[[ ${INSTALL_TOKEN} == INSTALL-AWG2 ]] || fail "AWG_PROFILE=awg2 must derive INSTALL_TOKEN=INSTALL-AWG2"
+) || exit 1
+
+# Written as an if, not `( ... ) && fail` — same style note as above.
+if (
+	AWG_PROFILE=awg9
+	AMNEZIAWG_INSTALLER_LIB_ONLY=1 source "${SCRIPT_DIR}/amneziawg-install.sh" 2>/dev/null
+); then
+	fail "an unsupported AWG_PROFILE must exit non-zero"
+fi
+
 # Header protection reads its ChaCha20 nonce out of the first 12 bytes of the
 # padding prefix. Below 12 the two sides derive different keystreams and
 # nothing connects, with no error anywhere — so the floor is a hard guard.
@@ -109,10 +140,20 @@ done
 	[[ ${SERVER_AWG_HEADER_PROTECTION_KEY} != "${first}" ]] ||
 		fail "header protection key must be random per node"
 
-	SERVER_AWG_HEADER_PROTECTION_KEY=operator-supplied-key
+	SERVER_AWG_HEADER_PROTECTION_KEY="cJ0PBHm9nGZbYpXvR1sKfQ2tLdW8uA6yE3iO5rTgVmc="
 	generateHeaderProtectionKey
-	[[ ${SERVER_AWG_HEADER_PROTECTION_KEY} == operator-supplied-key ]] ||
-		fail "an exported header protection key must be honoured"
+	[[ ${SERVER_AWG_HEADER_PROTECTION_KEY} == "cJ0PBHm9nGZbYpXvR1sKfQ2tLdW8uA6yE3iO5rTgVmc=" ]] ||
+		fail "a well-formed exported header protection key must be honoured"
+
+	# main.go also rejects a malformed key, but only at API startup — after
+	# the conf is written and the interface is up. This must fail here,
+	# before any disk write.
+	if (
+		SERVER_AWG_HEADER_PROTECTION_KEY=operator-supplied-key
+		generateHeaderProtectionKey
+	); then
+		fail "a malformed exported header protection key must be rejected before any disk write"
+	fi
 ) || exit 1
 
 (
@@ -153,6 +194,34 @@ fi
 # A stale bash on the node must not turn the preflight into a no-op: the gate
 # has to be reachable as a function, not only inline in installAmneziaWG.
 declare -F assert_awg3_supported >/dev/null || fail "assert_awg3_supported must be a function"
+
+# The awg2 S3/S4 prompt must keep telling the operator that 0 disables the
+# padding; awg3 must not, because 0 is not a valid answer there (S3/S4 must
+# reach the nonce floor of 12).
+(
+	AWG_S_PADDING_MIN=0
+	[[ $(s_padding_hint) == ", 0 disables" ]] || fail "awg2 S3/S4 prompt must offer the 0-disables hint"
+) || exit 1
+(
+	AWG_S_PADDING_MIN=12
+	[[ -z $(s_padding_hint) ]] || fail "awg3 S3/S4 prompt must not offer the 0-disables hint"
+) || exit 1
+
+# A co-located AWG3 install (adding awg3 beside an already-registered API)
+# must refuse to proceed without an explicit acknowledgement that the backend
+# server record already has is_support_awg_third set — otherwise the
+# rewritten .env silently hands unusable configs to pre-12.3.0 clients on the
+# same token and port.
+awg3_colocated_reuse_acknowledged "1" ||
+	fail "AWG3_COLOCATED_ACK=1 must acknowledge the co-located warning"
+awg3_colocated_reuse_acknowledged "AWG3-COLOCATED-ACK" ||
+	fail "the typed confirmation token must acknowledge the co-located warning"
+if awg3_colocated_reuse_acknowledged ""; then
+	fail "an empty acknowledgement must not satisfy the co-located gate"
+fi
+if awg3_colocated_reuse_acknowledged "y"; then
+	fail "an unrelated answer must not satisfy the co-located gate"
+fi
 
 h_spec_bounds "5" || fail "single H value should be valid"
 h_spec_bounds "5-10" || fail "H range should be valid"
@@ -275,8 +344,11 @@ grep -qx 'AWG_PROFILE=awg2' "${CONFIG_DIR}/.env" || fail "service.sh must defaul
 	grep -qx 'AWG_PROFILE=awg3' "${CONFIG_DIR}/.env"
 ) || fail "service.sh must record AWG_PROFILE=awg3 for an awg3 install"
 
-# Written as an if, not `( ... ) && fail`: the subshell is expected to exit
-# non-zero, and under `set -e` that would abort the whole test run.
+# Written as an if, not `( ... ) && fail`, matching the negative-assertion
+# style used elsewhere in this file. (A non-final command in an && list is
+# exempt from errexit, so `( ... ) && fail` would not abort the run either —
+# this is a style choice, not a safety requirement. See the note near the end
+# of this file for the full explanation.)
 if (
 	AWG_PROFILE=awg9
 	CONFIG_DIR="${TEST_AWG_DIR}/wireguard-api-bad"

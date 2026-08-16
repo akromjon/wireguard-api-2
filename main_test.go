@@ -666,6 +666,41 @@ SERVER_AWG_H3=500-600
 	}
 }
 
+// The "required parameters missing" error is shared by every modern profile
+// (isModernProfile covers awg2 and awg3). It must name whichever profile is
+// actually active, not hard-code AWG2 — a stale label there points an awg3
+// operator at the wrong troubleshooting path.
+func TestLoadWGParamsMissingParamsErrorNamesTheAWG3Profile(t *testing.T) {
+	env := setupTestEnv(t)
+	backendType = "amneziawg"
+	AWG_PROFILE = "awg3"
+	paramsPath := filepath.Join(env.dir, "incomplete-awg3-params")
+	params := `SERVER_PUB_IP=203.0.113.10
+SERVER_AWG_NIC=awg0
+SERVER_AWG_IPV4=10.66.66.1
+SERVER_PORT=443
+SERVER_PUB_KEY=server-public
+SERVER_AWG_S4=32
+SERVER_AWG_H1=100-200
+SERVER_AWG_H2=300-400
+SERVER_AWG_H3=500-600
+SERVER_AWG_H4=700-800
+SERVER_AWG_HEADER_PROTECTION_KEY=cJ0PBHm9nGZbYpXvR1sKfQ2tLdW8uA6yE3iO5rTgVmc=
+`
+	if err := os.WriteFile(paramsPath, []byte(params), 0600); err != nil {
+		t.Fatalf("writing params: %v", err)
+	}
+	WG_PARAMS_FILE = paramsPath
+
+	err := loadWGParams()
+	if err == nil || !strings.Contains(err.Error(), "required AWG3 parameters missing") {
+		t.Fatalf("expected the error to name the active profile (AWG3), got %v", err)
+	}
+	if !strings.Contains(err.Error(), "SERVER_AWG_S3") {
+		t.Errorf("error should identify missing S3, got %v", err)
+	}
+}
+
 func TestLoadAWG2ParamsRejectsMalformedValues(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -1240,6 +1275,33 @@ func TestValidateAWG3ParamsRejectsBadHeaderProtectionKeys(t *testing.T) {
 		params.ServerAWGHeaderProtectionKey = key
 		if err := validateAWG3Params(params); err == nil {
 			t.Errorf("%s header protection key must be rejected", name)
+		}
+	}
+}
+
+// The five AWG3 timing values reach client configs verbatim, exactly like
+// ContentPaddingAddition; every one of them must go through validateAWGRange
+// so a malformed value fails at startup instead of shipping into a config.
+func TestValidateAWG3ParamsRejectsMalformedTimingValues(t *testing.T) {
+	base := WGParams{
+		ServerAWGS1: "81", ServerAWGS2: "55", ServerAWGS3: "16", ServerAWGS4: "16",
+		ServerAWGHeaderProtectionKey: "cJ0PBHm9nGZbYpXvR1sKfQ2tLdW8uA6yE3iO5rTgVmc=",
+	}
+	for _, tc := range []struct {
+		name  string
+		apply func(*WGParams)
+	}{
+		{"ContentPaddingAddition", func(p *WGParams) { p.ServerAWGContentPaddingAddition = "40-8" }},
+		{"RekeyAfterTime", func(p *WGParams) { p.ServerAWGRekeyAfterTime = "140-100" }},
+		{"RekeyTimeout", func(p *WGParams) { p.ServerAWGRekeyTimeout = "abc" }},
+		{"RejectAfterTime", func(p *WGParams) { p.ServerAWGRejectAfterTime = "abc-10" }},
+		{"KeepaliveTimeout", func(p *WGParams) { p.ServerAWGKeepaliveTimeout = "10-abc" }},
+		{"MaxHandshakeAttempts", func(p *WGParams) { p.ServerAWGMaxHandshakeAttempts = "not-a-number" }},
+	} {
+		params := base
+		tc.apply(&params)
+		if err := validateAWG3Params(params); err == nil {
+			t.Errorf("malformed %s must be rejected", tc.name)
 		}
 	}
 }
