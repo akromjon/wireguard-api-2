@@ -58,6 +58,37 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
 	((RANDOM_AWG_S4 >= 4)) || fail "generated S4 ${RANDOM_AWG_S4} below the useful floor"
 done
 
+[[ ${AWG3} == 0 ]] || fail "sourcing without AWG_PROFILE must default to awg2"
+[[ ${AWG_S_PADDING_MIN} == 0 ]] || fail "awg2 must keep accepting S3=0"
+[[ ${INSTALL_TOKEN} == INSTALL-AWG2 ]] || fail "awg2 confirmation token must not change"
+
+# Header protection reads its ChaCha20 nonce out of the first 12 bytes of the
+# padding prefix. Below 12 the two sides derive different keystreams and
+# nothing connects, with no error anywhere — so the floor is a hard guard.
+(
+	AWG_S_PADDING_MIN=12
+	s_padding_in_range "12" 64 || fail "S3=12 must be accepted under awg3"
+	s_padding_in_range "32" 32 || fail "S4=32 must be accepted under awg3"
+	if s_padding_in_range "8" 64; then
+		fail "S3 below 12 must be rejected under awg3"
+	fi
+	if s_padding_in_range "0" 32; then
+		fail "S4=0 must be rejected under awg3"
+	fi
+) || exit 1
+
+(
+	AWG3=1
+	AWG_S_PADDING_MIN=12
+	for _ in 1 2 3 4 5 6 7 8 9 10; do
+		generateS3AndS4
+		((RANDOM_AWG_S3 >= 12)) || fail "awg3 generated S3 ${RANDOM_AWG_S3} below the nonce floor"
+		((RANDOM_AWG_S4 >= 12)) || fail "awg3 generated S4 ${RANDOM_AWG_S4} below the nonce floor"
+		((RANDOM_AWG_S3 <= 64)) || fail "awg3 generated S3 ${RANDOM_AWG_S3} above the maximum"
+		((RANDOM_AWG_S4 <= 32)) || fail "awg3 generated S4 ${RANDOM_AWG_S4} above the maximum"
+	done
+) || exit 1
+
 h_spec_bounds "5" || fail "single H value should be valid"
 h_spec_bounds "5-10" || fail "H range should be valid"
 if h_spec_bounds "4"; then
@@ -110,6 +141,11 @@ EXISTING_API_PORTS=(8080)
 printf '%s\n' '# CHOP-AWG-PROFILE: awg2' 'S3 = 0' >>"${AMNEZIAWG_DIR}/awg0.conf"
 detect_existing_awg_installations
 [[ ${AWG2_DETECTED} == 1 ]] || fail "AWG2 marker should be detected"
+
+printf '%s\n' 'HeaderProtectionKey = cJ0PBHm9nGZbYpXvR1sKfQ2tLdW8uA6yE3iO5rTgVmc=' >>"${AMNEZIAWG_DIR}/awg0.conf"
+detect_existing_awg_installations
+[[ ${AWG3_DETECTED} == 1 ]] || fail "an interface with header protection must be detected as awg3"
+[[ ${AWG2_DETECTED} == 1 ]] || fail "an awg3 interface must still count as a modern interface"
 
 # Adding a padded AWG2 interface beside an unpadded one: the incumbent is AWG2,
 # so nothing matches the legacy profile. It still keeps serving its peers, so

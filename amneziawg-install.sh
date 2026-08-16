@@ -15,12 +15,35 @@ AWG_H_MIN=5
 AWG_H_MAX=2147483647
 AWG_H_RANGE_WIDTH=1000
 
+# Which AmneziaWG profile this run installs. install2.sh exports awg2,
+# install3.sh exports awg3; everything AWG3-specific below is gated on AWG3=1.
+AWG_PROFILE=${AWG_PROFILE:-awg2}
+case ${AWG_PROFILE} in
+awg2)
+	AWG3=0
+	AWG_S_PADDING_MIN=0
+	INSTALL_TOKEN=INSTALL-AWG2
+	;;
+awg3)
+	AWG3=1
+	# Header protection derives its ChaCha20 nonce from the first 12 bytes of
+	# the random padding prefix, so every S value must reach 12.
+	AWG_S_PADDING_MIN=12
+	INSTALL_TOKEN=INSTALL-AWG3
+	;;
+*)
+	echo -e "${RED}Unsupported AWG_PROFILE: ${AWG_PROFILE} (expected awg2 or awg3)${NC}" >&2
+	exit 1
+	;;
+esac
+
 EXISTING_AWG_INTERFACES=()
 EXISTING_AWG_PORTS=()
 EXISTING_API_PORTS=()
 EXISTING_AWG_SUMMARIES=()
 LEGACY_AWG_DETECTED=0
 AWG2_DETECTED=0
+AWG3_DETECTED=0
 
 function array_contains() {
 	local expected=$1
@@ -69,6 +92,7 @@ function detect_existing_awg_installations() {
 	EXISTING_AWG_SUMMARIES=()
 	LEGACY_AWG_DETECTED=0
 	AWG2_DETECTED=0
+	AWG3_DETECTED=0
 
 	config_files=("${AMNEZIAWG_DIR}"/*.conf)
 	for config in "${config_files[@]}"; do
@@ -76,7 +100,13 @@ function detect_existing_awg_installations() {
 		interface=$(basename "${config}" .conf)
 		port=$(awk -F= '/^[[:space:]]*ListenPort[[:space:]]*=/ {gsub(/[[:space:]]/, "", $2); print $2; exit}' "${config}")
 		profile=legacy
-		if grep -Eq '^# CHOP-AWG-PROFILE: awg2$|^[[:space:]]*S3[[:space:]]*=' "${config}"; then
+		if grep -Eq '^[[:space:]]*HeaderProtectionKey[[:space:]]*=' "${config}"; then
+			profile=awg3
+			AWG3_DETECTED=1
+			# An awg3 interface is a modern interface: the "manage, don't
+			# duplicate" guard below must fire for it too.
+			AWG2_DETECTED=1
+		elif grep -Eq '^# CHOP-AWG-PROFILE: awg[23]$|^[[:space:]]*S3[[:space:]]*=' "${config}"; then
 			profile=awg2
 			AWG2_DETECTED=1
 		else
@@ -564,15 +594,20 @@ function readH1AndH2AndH3AndH4() {
 # feature entirely. Randomising per node beats a fleet-wide constant: a shared
 # offset is one fingerprint to learn, a per-node offset is 34.
 function generateS3AndS4() {
-	RANDOM_AWG_S3=$(shuf -i8-64 -n1)
-	RANDOM_AWG_S4=$(shuf -i4-32 -n1)
+	local s3_floor=8 s4_floor=4
+	if ((AWG3 == 1)); then
+		s3_floor=${AWG_S_PADDING_MIN}
+		s4_floor=${AWG_S_PADDING_MIN}
+	fi
+	RANDOM_AWG_S3=$(shuf -i"${s3_floor}-64" -n1)
+	RANDOM_AWG_S4=$(shuf -i"${s4_floor}-32" -n1)
 }
 
 # Validates an S3/S4 padding answer. Extracted so the prompt guard is
 # testable without driving an interactive read.
 function s_padding_in_range() {
 	local value=$1 max=$2
-	[[ ${value} =~ ^[0-9]+$ ]] && ((value <= max))
+	[[ ${value} =~ ^[0-9]+$ ]] && ((value >= AWG_S_PADDING_MIN)) && ((value <= max))
 }
 
 function readS3AndS4() {
@@ -586,11 +621,14 @@ function readS3AndS4() {
 	# so 0 fails their guard and the loop runs.
 	SERVER_AWG_S3="${SERVER_AWG_S3:-}"
 	SERVER_AWG_S4="${SERVER_AWG_S4:-}"
+	if ((AWG3 == 1)); then
+		echo "AWG3 header protection reads its nonce from the first 12 bytes of the padding prefix; S3 and S4 must be at least 12."
+	fi
 	until s_padding_in_range "${SERVER_AWG_S3}" 64; do
-		read -rp "Server AmneziaWG S3 padding [0-64, 0 disables]: " -e -i "${RANDOM_AWG_S3}" SERVER_AWG_S3
+		read -rp "Server AmneziaWG S3 padding [${AWG_S_PADDING_MIN}-64]: " -e -i "${RANDOM_AWG_S3}" SERVER_AWG_S3
 	done
 	until s_padding_in_range "${SERVER_AWG_S4}" 32; do
-		read -rp "Server AmneziaWG S4 padding [0-32, 0 disables]: " -e -i "${RANDOM_AWG_S4}" SERVER_AWG_S4
+		read -rp "Server AmneziaWG S4 padding [${AWG_S_PADDING_MIN}-32]: " -e -i "${RANDOM_AWG_S4}" SERVER_AWG_S4
 	done
 }
 
@@ -859,7 +897,7 @@ function installQuestions() {
 	readIParams
 
 	echo ""
-	echo "AWG2 installation summary:"
+	echo "${AWG_PROFILE^^} installation summary:"
 	echo "  Existing interfaces: ${EXISTING_AWG_INTERFACES[*]:-none} (unchanged)"
 	echo "  New interface: ${SERVER_AWG_NIC}"
 	echo "  New VPN listener: UDP ${SERVER_PORT}"
@@ -877,9 +915,9 @@ function installQuestions() {
 	echo ""
 	validate_installation_choices || exit 1
 	if [[ -z ${INSTALL_CONFIRMATION:-} ]]; then
-		read -rp "Type INSTALL-AWG2 to confirm these changes: " INSTALL_CONFIRMATION
+		read -rp "Type ${INSTALL_TOKEN} to confirm these changes: " INSTALL_CONFIRMATION
 	fi
-	if [[ ${INSTALL_CONFIRMATION} != INSTALL-AWG2 ]]; then
+	if [[ ${INSTALL_CONFIRMATION} != "${INSTALL_TOKEN}" ]]; then
 		echo "Installation cancelled; no configuration changes were made."
 		exit 0
 	fi
