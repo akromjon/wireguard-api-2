@@ -15,12 +15,35 @@ AWG_H_MIN=5
 AWG_H_MAX=2147483647
 AWG_H_RANGE_WIDTH=1000
 
+# Which AmneziaWG profile this run installs. install2.sh exports awg2,
+# install3.sh exports awg3; everything AWG3-specific below is gated on AWG3=1.
+AWG_PROFILE=${AWG_PROFILE:-awg2}
+case ${AWG_PROFILE} in
+awg2)
+	AWG3=0
+	AWG_S_PADDING_MIN=0
+	INSTALL_TOKEN=INSTALL-AWG2
+	;;
+awg3)
+	AWG3=1
+	# Header protection derives its ChaCha20 nonce from the first 12 bytes of
+	# the random padding prefix, so every S value must reach 12.
+	AWG_S_PADDING_MIN=12
+	INSTALL_TOKEN=INSTALL-AWG3
+	;;
+*)
+	echo -e "${RED}Unsupported AWG_PROFILE: ${AWG_PROFILE} (expected awg2 or awg3)${NC}" >&2
+	exit 1
+	;;
+esac
+
 EXISTING_AWG_INTERFACES=()
 EXISTING_AWG_PORTS=()
 EXISTING_API_PORTS=()
 EXISTING_AWG_SUMMARIES=()
 LEGACY_AWG_DETECTED=0
 AWG2_DETECTED=0
+AWG3_DETECTED=0
 
 function array_contains() {
 	local expected=$1
@@ -69,6 +92,7 @@ function detect_existing_awg_installations() {
 	EXISTING_AWG_SUMMARIES=()
 	LEGACY_AWG_DETECTED=0
 	AWG2_DETECTED=0
+	AWG3_DETECTED=0
 
 	config_files=("${AMNEZIAWG_DIR}"/*.conf)
 	for config in "${config_files[@]}"; do
@@ -76,7 +100,13 @@ function detect_existing_awg_installations() {
 		interface=$(basename "${config}" .conf)
 		port=$(awk -F= '/^[[:space:]]*ListenPort[[:space:]]*=/ {gsub(/[[:space:]]/, "", $2); print $2; exit}' "${config}")
 		profile=legacy
-		if grep -Eq '^# CHOP-AWG-PROFILE: awg2$|^[[:space:]]*S3[[:space:]]*=' "${config}"; then
+		if grep -Eq '^[[:space:]]*HeaderProtectionKey[[:space:]]*=' "${config}"; then
+			profile=awg3
+			AWG3_DETECTED=1
+			# An awg3 interface is a modern interface: the "manage, don't
+			# duplicate" guard below must fire for it too.
+			AWG2_DETECTED=1
+		elif grep -Eq '^# CHOP-AWG-PROFILE: awg[23]$|^[[:space:]]*S3[[:space:]]*=' "${config}"; then
 			profile=awg2
 			AWG2_DETECTED=1
 		else
@@ -564,15 +594,126 @@ function readH1AndH2AndH3AndH4() {
 # feature entirely. Randomising per node beats a fleet-wide constant: a shared
 # offset is one fingerprint to learn, a per-node offset is 34.
 function generateS3AndS4() {
-	RANDOM_AWG_S3=$(shuf -i8-64 -n1)
-	RANDOM_AWG_S4=$(shuf -i4-32 -n1)
+	local s3_floor=8 s4_floor=4
+	if ((AWG3 == 1)); then
+		s3_floor=${AWG_S_PADDING_MIN}
+		s4_floor=${AWG_S_PADDING_MIN}
+	fi
+	RANDOM_AWG_S3=$(shuf -i"${s3_floor}-64" -n1)
+	RANDOM_AWG_S4=$(shuf -i"${s4_floor}-32" -n1)
+}
+
+# 32 random bytes, base64 — the same shape `awg genkey` produces. Generated
+# from /dev/urandom rather than the AmneziaWG tools so it works before the
+# packages are installed and stays testable off a node.
+function generateHeaderProtectionKey() {
+	if [[ -n ${SERVER_AWG_HEADER_PROTECTION_KEY:-} ]]; then
+		# An operator-exported key must have the right shape before anything
+		# is written to disk. main.go rejects a malformed key too, but only at
+		# API startup — after the conf is written and the interface is up.
+		if [[ ! ${SERVER_AWG_HEADER_PROTECTION_KEY} =~ ^[A-Za-z0-9+/]{43}=$ ]]; then
+			echo -e "${RED}SERVER_AWG_HEADER_PROTECTION_KEY must be 32 bytes of base64 (44 characters, padded with '='); got '${SERVER_AWG_HEADER_PROTECTION_KEY}'.${NC}" >&2
+			exit 1
+		fi
+		return
+	fi
+	SERVER_AWG_HEADER_PROTECTION_KEY=$(head -c 32 /dev/urandom | base64 | tr -d '\n')
+}
+
+# Extra payload padding on top of S4. Kept small on purpose: S4 already grows
+# every transport packet, and the MTU/packet-size question from the AWG2
+# migration is still open.
+function generateContentPaddingAddition() {
+	if [[ -n ${SERVER_AWG_CONTENT_PADDING_ADDITION:-} ]]; then
+		return
+	fi
+	local low
+	low=$(shuf -i1-16 -n1)
+	SERVER_AWG_CONTENT_PADDING_ADDITION="${low}-$((low + $(shuf -i8-48 -n1)))"
+}
+
+# Emits the AWG3 timing directives an operator exported, one per line, and
+# nothing at all when none were. These are never generated or prompted for:
+# randomising rekey and keepalive timing would shift the reconnect behaviour
+# the sleep/wake path depends on.
+function awg3_timing_directives() {
+	local pair name var
+	for pair in \
+		"RekeyAfterTime:SERVER_AWG_REKEY_AFTER_TIME" \
+		"RekeyTimeout:SERVER_AWG_REKEY_TIMEOUT" \
+		"RejectAfterTime:SERVER_AWG_REJECT_AFTER_TIME" \
+		"KeepaliveTimeout:SERVER_AWG_KEEPALIVE_TIMEOUT" \
+		"MaxHandshakeAttempts:SERVER_AWG_MAX_HANDSHAKE_ATTEMPTS"; do
+		name=${pair%%:*}
+		var=${pair##*:}
+		if [[ -n ${!var:-} ]]; then
+			echo "${name} = ${!var}"
+		fi
+	done
+	return 0
+}
+
+function awg3_module_version_ok() {
+	local version=$1
+	[[ ${version} =~ ^([0-9]+) ]] || return 1
+	((BASH_REMATCH[1] >= 3))
+}
+
+# AWG3 needs a 3.0 module and userspace. Called after the packages are
+# installed and before anything is written to disk, so a node that cannot do
+# header protection is left exactly as it was.
+function assert_awg3_supported() {
+	local module_version="" module_readable=0
+	if [[ -r /sys/module/amneziawg/version ]]; then
+		module_readable=1
+		module_version=$(</sys/module/amneziawg/version)
+	fi
+	if awg3_module_version_ok "${module_version}"; then
+		return 0
+	fi
+	# A READABLE module version that failed the check above is a hard failure:
+	# the module is definitely loaded and definitely too old, no matter what a
+	# newly-installed userspace tool claims. `apt install --only-upgrade
+	# amneziawg-dkms amneziawg-tools` can put 3.x tools on disk while the
+	# running kernel module stays 2.x until a reboot; falling through to the
+	# help probe in that state would pass the gate against a 2.x module,
+	# inverting its purpose. Only fall through to the probe when the module
+	# version could not be read at all — the normal fresh-install case where
+	# the module has not been loaded yet.
+	if ((module_readable == 0)) && awg set --help 2>&1 | grep -q 'header-protection-key'; then
+		return 0
+	fi
+	echo -e "${RED}This host's AmneziaWG build does not support header protection.${NC}" >&2
+	echo -e "${ORANGE}Loaded module version: ${module_version:-unknown}; AWG3 needs 3.0 or newer.${NC}" >&2
+	echo -e "${ORANGE}Upgrade the Amnezia PPA packages (apt update && apt install --only-upgrade amneziawg-dkms amneziawg-tools), reboot, then rerun install3.sh.${NC}" >&2
+	return 1
+}
+
+# Gate a co-located AWG3 install (REUSE_EXISTING_API=1) on an explicit
+# operator acknowledgement. Rewriting the live .env of an already-registered
+# node's API to AWG_PROFILE=awg3 keeps the same port and token, so the
+# backend server record for that node must already have is_support_awg_third
+# set before the API restarts — otherwise it hands unusable AWG3 configs to
+# every pre-12.3.0 client with zero replies and no error anywhere. Extracted
+# so the gate is testable without driving an interactive read.
+function awg3_colocated_reuse_acknowledged() {
+	local ack=$1
+	[[ ${ack} == "1" || ${ack} == "AWG3-COLOCATED-ACK" ]]
 }
 
 # Validates an S3/S4 padding answer. Extracted so the prompt guard is
 # testable without driving an interactive read.
 function s_padding_in_range() {
 	local value=$1 max=$2
-	[[ ${value} =~ ^[0-9]+$ ]] && ((value <= max))
+	[[ ${value} =~ ^[0-9]+$ ]] && ((value >= AWG_S_PADDING_MIN)) && ((value <= max))
+}
+
+# Returns the "0 disables" prompt hint when 0 is a valid answer (awg2), or
+# nothing when it is not (awg3, where the nonce floor rules 0 out). Extracted
+# so the prompt text is testable without driving an interactive read.
+function s_padding_hint() {
+	((AWG_S_PADDING_MIN == 0)) && echo ", 0 disables"
+	return 0
 }
 
 function readS3AndS4() {
@@ -586,11 +727,16 @@ function readS3AndS4() {
 	# so 0 fails their guard and the loop runs.
 	SERVER_AWG_S3="${SERVER_AWG_S3:-}"
 	SERVER_AWG_S4="${SERVER_AWG_S4:-}"
+	local padding_hint
+	padding_hint=$(s_padding_hint)
+	if ((AWG3 == 1)); then
+		echo "AWG3 header protection reads its nonce from the first 12 bytes of the padding prefix; S3 and S4 must be at least 12."
+	fi
 	until s_padding_in_range "${SERVER_AWG_S3}" 64; do
-		read -rp "Server AmneziaWG S3 padding [0-64, 0 disables]: " -e -i "${RANDOM_AWG_S3}" SERVER_AWG_S3
+		read -rp "Server AmneziaWG S3 padding [${AWG_S_PADDING_MIN}-64${padding_hint}]: " -e -i "${RANDOM_AWG_S3}" SERVER_AWG_S3
 	done
 	until s_padding_in_range "${SERVER_AWG_S4}" 32; do
-		read -rp "Server AmneziaWG S4 padding [0-32, 0 disables]: " -e -i "${RANDOM_AWG_S4}" SERVER_AWG_S4
+		read -rp "Server AmneziaWG S4 padding [${AWG_S_PADDING_MIN}-32${padding_hint}]: " -e -i "${RANDOM_AWG_S4}" SERVER_AWG_S4
 	done
 }
 
@@ -858,15 +1004,27 @@ function installQuestions() {
 	readS3AndS4
 	readIParams
 
+	if ((AWG3 == 1)); then
+		generateHeaderProtectionKey
+		generateContentPaddingAddition
+	fi
+
 	echo ""
-	echo "AWG2 installation summary:"
+	echo "${AWG_PROFILE^^} installation summary:"
 	echo "  Existing interfaces: ${EXISTING_AWG_INTERFACES[*]:-none} (unchanged)"
 	echo "  New interface: ${SERVER_AWG_NIC}"
 	echo "  New VPN listener: UDP ${SERVER_PORT}"
 	echo "  New tunnel addresses: ${SERVER_AWG_IPV4}/16, ${SERVER_AWG_IPV6}/64"
 	if [[ ${REUSE_EXISTING_API} == 1 ]]; then
 		echo "  Management API: upgrade ${API_SERVICE_NAME} on existing TCP ${API_PORT}"
-		echo "    Existing API token and backend server record: preserved"
+		if ((AWG3 == 1)); then
+			echo "    Existing API token: preserved"
+			echo -e "    ${RED}WARNING: the backend server record for this node is NOT updated by this installer.${NC}"
+			echo -e "    ${RED}Its is_support_awg_third flag MUST already be set before the API restarts, or${NC}"
+			echo -e "    ${RED}pre-12.3.0 clients holding this node's config get zero replies with no error anywhere.${NC}"
+		else
+			echo "    Existing API token and backend server record: preserved"
+		fi
 		echo "    New API target: ${AMNEZIAWG_DIR}/${SERVER_AWG_NIC}.conf"
 		echo "    Legacy ${LEGACY_WG_CONFIG_FILE}: remains running during config rotation"
 	else
@@ -874,12 +1032,34 @@ function installQuestions() {
 	fi
 	echo "  New params file: ${SERVER_PARAMS_FILE}"
 	echo "  New clients directory: ${AWG_CLIENTS_DIR}"
+	if ((AWG3 == 1)); then
+		echo "  Header protection: enabled (per-node key)"
+		echo "  Content padding addition: ${SERVER_AWG_CONTENT_PADDING_ADDITION}"
+		echo "  Serves iOS 12.3.0+ and Android 2.4.2+ clients only"
+	fi
 	echo ""
+
+	# A co-located AWG3 install (REUSE_EXISTING_API=1) reuses the already
+	# registered node API instead of creating a new backend record. Refuse to
+	# proceed without an explicit acknowledgement that is_support_awg_third is
+	# already set on that record. A fresh node never reaches this: it always
+	# has REUSE_EXISTING_API=0.
+	if ((AWG3 == 1 && REUSE_EXISTING_API == 1)); then
+		if [[ -z ${AWG3_COLOCATED_ACK:-} ]] && [[ -t 0 ]]; then
+			read -rp "Type AWG3-COLOCATED-ACK to confirm the backend record already has is_support_awg_third set: " AWG3_COLOCATED_ACK
+		fi
+		if ! awg3_colocated_reuse_acknowledged "${AWG3_COLOCATED_ACK:-}"; then
+			echo "Installation cancelled; no configuration changes were made."
+			echo "Set is_support_awg_third on this node's backend server record, then rerun with AWG3_COLOCATED_ACK=1 exported (or confirm interactively)."
+			exit 0
+		fi
+	fi
+
 	validate_installation_choices || exit 1
 	if [[ -z ${INSTALL_CONFIRMATION:-} ]]; then
-		read -rp "Type INSTALL-AWG2 to confirm these changes: " INSTALL_CONFIRMATION
+		read -rp "Type ${INSTALL_TOKEN} to confirm these changes: " INSTALL_CONFIRMATION
 	fi
-	if [[ ${INSTALL_CONFIRMATION} != INSTALL-AWG2 ]]; then
+	if [[ ${INSTALL_CONFIRMATION} != "${INSTALL_TOKEN}" ]]; then
 		echo "Installation cancelled; no configuration changes were made."
 		exit 0
 	fi
@@ -973,6 +1153,10 @@ function installAmneziaWG() {
 		dnf install -y amneziawg-dkms amneziawg-tools iptables
 	fi
 
+	if ((AWG3 == 1)) && ! assert_awg3_supported; then
+		exit 1
+	fi
+
 	# Create AmneziaWG directory if it doesn't exist
 	mkdir -p "${AMNEZIAWG_DIR}"
 	chmod 700 "${AMNEZIAWG_DIR}"
@@ -1005,20 +1189,32 @@ SERVER_AWG_H1=${SERVER_AWG_H1}
 SERVER_AWG_H2=${SERVER_AWG_H2}
 SERVER_AWG_H3=${SERVER_AWG_H3}
 SERVER_AWG_H4=${SERVER_AWG_H4}
-AWG_PROFILE=awg2" >"${SERVER_PARAMS_FILE}"
+AWG_PROFILE=${AWG_PROFILE}" >"${SERVER_PARAMS_FILE}"
 	chmod 600 "${SERVER_PARAMS_FILE}"
 	printf "SERVER_AWG_I1='%s'\n" "${SERVER_AWG_I1}" >>"${SERVER_PARAMS_FILE}"
 	printf "SERVER_AWG_I2='%s'\n" "${SERVER_AWG_I2}" >>"${SERVER_PARAMS_FILE}"
 	printf "SERVER_AWG_I3='%s'\n" "${SERVER_AWG_I3}" >>"${SERVER_PARAMS_FILE}"
 	printf "SERVER_AWG_I4='%s'\n" "${SERVER_AWG_I4}" >>"${SERVER_PARAMS_FILE}"
 	printf "SERVER_AWG_I5='%s'\n" "${SERVER_AWG_I5}" >>"${SERVER_PARAMS_FILE}"
+	if ((AWG3 == 1)); then
+		printf 'SERVER_AWG_HEADER_PROTECTION_KEY=%s\n' "${SERVER_AWG_HEADER_PROTECTION_KEY}" >>"${SERVER_PARAMS_FILE}"
+		printf 'SERVER_AWG_CONTENT_PADDING_ADDITION=%s\n' "${SERVER_AWG_CONTENT_PADDING_ADDITION}" >>"${SERVER_PARAMS_FILE}"
+		local timing_var
+		for timing_var in SERVER_AWG_REKEY_AFTER_TIME SERVER_AWG_REKEY_TIMEOUT \
+			SERVER_AWG_REJECT_AFTER_TIME SERVER_AWG_KEEPALIVE_TIMEOUT \
+			SERVER_AWG_MAX_HANDSHAKE_ATTEMPTS; do
+			if [[ -n ${!timing_var:-} ]]; then
+				printf '%s=%s\n' "${timing_var}" "${!timing_var}" >>"${SERVER_PARAMS_FILE}"
+			fi
+		done
+	fi
 
 	# Add server interface
 	echo "[Interface]
 Address = ${SERVER_AWG_IPV4}/16,${SERVER_AWG_IPV6}/64
 ListenPort = ${SERVER_PORT}
 PrivateKey = ${SERVER_PRIV_KEY}
-# CHOP-AWG-PROFILE: awg2
+# CHOP-AWG-PROFILE: ${AWG_PROFILE}
 Jc = ${SERVER_AWG_JC}
 Jmin = ${SERVER_AWG_JMIN}
 Jmax = ${SERVER_AWG_JMAX}
@@ -1036,6 +1232,15 @@ H4 = ${SERVER_AWG_H4}" >"${SERVER_AWG_CONF}"
 	[[ -n ${SERVER_AWG_I3} ]] && echo "I3 = ${SERVER_AWG_I3}" >>"${SERVER_AWG_CONF}"
 	[[ -n ${SERVER_AWG_I4} ]] && echo "I4 = ${SERVER_AWG_I4}" >>"${SERVER_AWG_CONF}"
 	[[ -n ${SERVER_AWG_I5} ]] && echo "I5 = ${SERVER_AWG_I5}" >>"${SERVER_AWG_CONF}"
+
+	if ((AWG3 == 1)); then
+		# Inline base64, exactly like PrivateKey. The file-path form of this
+		# key applies to `awg set`, not to conf files.
+		echo "HeaderProtectionKey = ${SERVER_AWG_HEADER_PROTECTION_KEY}" >>"${SERVER_AWG_CONF}"
+		[[ -n ${SERVER_AWG_CONTENT_PADDING_ADDITION} ]] &&
+			echo "ContentPaddingAddition = ${SERVER_AWG_CONTENT_PADDING_ADDITION}" >>"${SERVER_AWG_CONF}"
+		awg3_timing_directives >>"${SERVER_AWG_CONF}"
+	fi
 
 	if pgrep firewalld; then
 		FIREWALLD_IPV4_ADDRESS=$(echo "${SERVER_AWG_IPV4}" | cut -d"." -f1-2)".0.0"
@@ -1061,15 +1266,18 @@ PostDown = ip6tables -D FORWARD -i ${SERVER_AWG_NIC} -j ACCEPT
 PostDown = ip6tables -t nat -D POSTROUTING -o ${SERVER_PUB_NIC} -j MASQUERADE" >>"${SERVER_AWG_CONF}"
 	fi
 
-	# Validate the generated AWG2 directives before touching the live service.
-	# This catches an outdated userspace tool early instead of leaving a broken
-	# interface behind after installation.
+	# `awg-quick strip` re-emits the config with wg-quick-only keys removed;
+	# this is a syntax check on the userspace tool, catching an outdated
+	# `awg-quick` early. It is NOT proof the kernel module accepts every
+	# [Interface] directive — an unknown one (like HeaderProtectionKey) passes
+	# through unvalidated. The real proof for AWG3 is the interface bring-up
+	# check further below, right before the API is installed.
 	if ! command -v awg-quick >/dev/null 2>&1; then
-		echo -e "${RED}AmneziaWG awg-quick was not installed; cannot validate AWG2 config.${NC}"
+		echo -e "${RED}AmneziaWG awg-quick was not installed; cannot validate ${AWG_PROFILE} config.${NC}"
 		exit 1
 	fi
 	if ! awg-quick strip "${SERVER_AWG_NIC}" >/dev/null; then
-		echo -e "${RED}Installed AmneziaWG tools rejected the AWG2 config.${NC}"
+		echo -e "${RED}Installed AmneziaWG tools rejected the ${AWG_PROFILE} config.${NC}"
 		echo -e "${ORANGE}Upgrade the AmneziaWG userspace tools/kernel package and rerun on a clean VPS.${NC}"
 		exit 1
 	fi
@@ -1186,12 +1394,25 @@ net.ipv6.conf.all.forwarding = 1" >/etc/sysctl.d/awg.conf
 		echo -e "${ORANGE}If you don't have internet connectivity from your client, try to reboot the server.${NC}"
 	fi
 
+	# AWG3 needs a live kernel interface that actually accepted
+	# HeaderProtectionKey; the awg-quick strip check earlier only proves the
+	# config parses. A dead interface here (module still too old despite the
+	# preflight gate, a race, ...) must not proceed to install the API or
+	# register a working-looking node with the backend. The awg2 path stays
+	# non-fatal above: this only hard-fails under AWG3.
+	if ((AWG3 == 1)) && ! systemctl is-active --quiet "awg-quick@${SERVER_AWG_NIC}"; then
+		echo -e "${RED}AWG3 interface ${SERVER_AWG_NIC} failed to start; refusing to install the API or register with the backend.${NC}" >&2
+		echo -e "${ORANGE}Check: systemctl status awg-quick@${SERVER_AWG_NIC}; journalctl -u awg-quick@${SERVER_AWG_NIC} -n 50${NC}" >&2
+		exit 1
+	fi
+
 	# Install the WireGuard API. On a co-located node, upgrade the existing TCP
 	# service in place and point it at the new AWG2 interface while preserving
 	# the existing API token and backend endpoint.
 	echo -e "\n${GREEN}Installing WireGuard API...${NC}"
 	if [[ ${REUSE_EXISTING_API} == 1 ]]; then
 		if ! AWG_INTERFACE="${SERVER_AWG_NIC}" \
+			AWG_PROFILE="${AWG_PROFILE}" \
 			INSTALL_BINARY="${API_BINARY_PATH}" \
 			CONFIG_DIR="${API_CONFIG_DIR}" \
 			SERVICE_NAME="${API_SERVICE_NAME}" \
@@ -1206,6 +1427,7 @@ net.ipv6.conf.all.forwarding = 1" >/etc/sysctl.d/awg.conf
 		fi
 	else
 		if ! AWG_INTERFACE="${SERVER_AWG_NIC}" \
+			AWG_PROFILE="${AWG_PROFILE}" \
 			INSTALL_BINARY="${API_BINARY_PATH}" \
 			CONFIG_DIR="${API_CONFIG_DIR}" \
 			SERVICE_NAME="${API_SERVICE_NAME}" \

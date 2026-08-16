@@ -666,6 +666,41 @@ SERVER_AWG_H3=500-600
 	}
 }
 
+// The "required parameters missing" error is shared by every modern profile
+// (isModernProfile covers awg2 and awg3). It must name whichever profile is
+// actually active, not hard-code AWG2 — a stale label there points an awg3
+// operator at the wrong troubleshooting path.
+func TestLoadWGParamsMissingParamsErrorNamesTheAWG3Profile(t *testing.T) {
+	env := setupTestEnv(t)
+	backendType = "amneziawg"
+	AWG_PROFILE = "awg3"
+	paramsPath := filepath.Join(env.dir, "incomplete-awg3-params")
+	params := `SERVER_PUB_IP=203.0.113.10
+SERVER_AWG_NIC=awg0
+SERVER_AWG_IPV4=10.66.66.1
+SERVER_PORT=443
+SERVER_PUB_KEY=server-public
+SERVER_AWG_S4=32
+SERVER_AWG_H1=100-200
+SERVER_AWG_H2=300-400
+SERVER_AWG_H3=500-600
+SERVER_AWG_H4=700-800
+SERVER_AWG_HEADER_PROTECTION_KEY=cJ0PBHm9nGZbYpXvR1sKfQ2tLdW8uA6yE3iO5rTgVmc=
+`
+	if err := os.WriteFile(paramsPath, []byte(params), 0600); err != nil {
+		t.Fatalf("writing params: %v", err)
+	}
+	WG_PARAMS_FILE = paramsPath
+
+	err := loadWGParams()
+	if err == nil || !strings.Contains(err.Error(), "required AWG3 parameters missing") {
+		t.Fatalf("expected the error to name the active profile (AWG3), got %v", err)
+	}
+	if !strings.Contains(err.Error(), "SERVER_AWG_S3") {
+		t.Errorf("error should identify missing S3, got %v", err)
+	}
+}
+
 func TestLoadAWG2ParamsRejectsMalformedValues(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -1191,5 +1226,248 @@ func TestAllocateClientIPv6(t *testing.T) {
 	}
 	if ipv6 != "fd42:42:42::3" {
 		t.Errorf("got ipv6 %s, want fd42:42:42::3 (::1 server, ::2 taken)", ipv6)
+	}
+}
+
+func TestValidateAWG3ParamsAcceptsAWellFormedNode(t *testing.T) {
+	params := WGParams{
+		ServerAWGS1: "81", ServerAWGS2: "55", ServerAWGS3: "16", ServerAWGS4: "16",
+		ServerAWGHeaderProtectionKey:    "cJ0PBHm9nGZbYpXvR1sKfQ2tLdW8uA6yE3iO5rTgVmc=",
+		ServerAWGContentPaddingAddition: "8-40",
+	}
+	if err := validateAWG3Params(params); err != nil {
+		t.Fatalf("expected a valid AWG3 node to pass: %v", err)
+	}
+}
+
+func TestValidateAWG3ParamsRejectsPaddingBelowTheNonceFloor(t *testing.T) {
+	base := WGParams{
+		ServerAWGS1: "81", ServerAWGS2: "55", ServerAWGS3: "16", ServerAWGS4: "16",
+		ServerAWGHeaderProtectionKey: "cJ0PBHm9nGZbYpXvR1sKfQ2tLdW8uA6yE3iO5rTgVmc=",
+	}
+	for _, tc := range []struct {
+		name  string
+		apply func(*WGParams)
+	}{
+		{"S1", func(p *WGParams) { p.ServerAWGS1 = "11" }},
+		{"S2", func(p *WGParams) { p.ServerAWGS2 = "0" }},
+		{"S3", func(p *WGParams) { p.ServerAWGS3 = "8" }},
+		{"S4", func(p *WGParams) { p.ServerAWGS4 = "4" }},
+	} {
+		params := base
+		tc.apply(&params)
+		err := validateAWG3Params(params)
+		if err == nil || !strings.Contains(err.Error(), tc.name) {
+			t.Errorf("%s below 12 must be rejected, got %v", tc.name, err)
+		}
+	}
+}
+
+func TestValidateAWG3ParamsRejectsBadHeaderProtectionKeys(t *testing.T) {
+	base := WGParams{ServerAWGS1: "81", ServerAWGS2: "55", ServerAWGS3: "16", ServerAWGS4: "16"}
+	for name, key := range map[string]string{
+		"empty":      "",
+		"not base64": "!!!!not-base64!!!!",
+		"too short":  "c2hvcnRrZXk=",
+		"all zero":   "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+	} {
+		params := base
+		params.ServerAWGHeaderProtectionKey = key
+		if err := validateAWG3Params(params); err == nil {
+			t.Errorf("%s header protection key must be rejected", name)
+		}
+	}
+}
+
+// The five AWG3 timing values reach client configs verbatim, exactly like
+// ContentPaddingAddition; every one of them must go through validateAWGRange
+// so a malformed value fails at startup instead of shipping into a config.
+func TestValidateAWG3ParamsRejectsMalformedTimingValues(t *testing.T) {
+	base := WGParams{
+		ServerAWGS1: "81", ServerAWGS2: "55", ServerAWGS3: "16", ServerAWGS4: "16",
+		ServerAWGHeaderProtectionKey: "cJ0PBHm9nGZbYpXvR1sKfQ2tLdW8uA6yE3iO5rTgVmc=",
+	}
+	for _, tc := range []struct {
+		name  string
+		apply func(*WGParams)
+	}{
+		{"ContentPaddingAddition", func(p *WGParams) { p.ServerAWGContentPaddingAddition = "40-8" }},
+		{"RekeyAfterTime", func(p *WGParams) { p.ServerAWGRekeyAfterTime = "140-100" }},
+		{"RekeyTimeout", func(p *WGParams) { p.ServerAWGRekeyTimeout = "abc" }},
+		{"RejectAfterTime", func(p *WGParams) { p.ServerAWGRejectAfterTime = "abc-10" }},
+		{"KeepaliveTimeout", func(p *WGParams) { p.ServerAWGKeepaliveTimeout = "10-abc" }},
+		{"MaxHandshakeAttempts", func(p *WGParams) { p.ServerAWGMaxHandshakeAttempts = "not-a-number" }},
+	} {
+		params := base
+		tc.apply(&params)
+		if err := validateAWG3Params(params); err == nil {
+			t.Errorf("malformed %s must be rejected", tc.name)
+		}
+	}
+}
+
+func TestValidateAWGRangeAcceptsEmptyBareAndOrderedRanges(t *testing.T) {
+	for _, value := range []string{"", "32", "8-40"} {
+		if err := validateAWGRange(value); err != nil {
+			t.Errorf("%q must be accepted: %v", value, err)
+		}
+	}
+	for _, value := range []string{"40-8", "abc", "8-abc"} {
+		if err := validateAWGRange(value); err == nil {
+			t.Errorf("%q must be rejected", value)
+		}
+	}
+}
+
+func TestLoadWGParamsRequiresHeaderProtectionKeyUnderAWG3(t *testing.T) {
+	env := setupTestEnv(t)
+	backendType = "amneziawg"
+	AWG_PROFILE = "awg3"
+
+	paramsPath := filepath.Join(env.dir, "params-awg3")
+	writeAWG3ParamsFile(t, paramsPath, "")
+	WG_PARAMS_FILE = paramsPath
+	paramsFileExplicit = true
+	configFileExplicit = true
+
+	err := loadWGParams()
+	if err == nil || !strings.Contains(err.Error(), "SERVER_AWG_HEADER_PROTECTION_KEY") {
+		t.Fatalf("awg3 node without a header protection key must fail to load, got %v", err)
+	}
+
+	writeAWG3ParamsFile(t, paramsPath, "cJ0PBHm9nGZbYpXvR1sKfQ2tLdW8uA6yE3iO5rTgVmc=")
+	if err := loadWGParams(); err != nil {
+		t.Fatalf("complete awg3 params must load: %v", err)
+	}
+	if wgParams.ServerAWGHeaderProtectionKey == "" ||
+		wgParams.ServerAWGContentPaddingAddition != "8-40" ||
+		wgParams.ServerAWGRekeyAfterTime != "100-140" {
+		t.Fatalf("AWG3 params were not read into wgParams: %+v", wgParams)
+	}
+}
+
+// writeAWG3ParamsFile writes a complete AWG3 params file. An empty
+// headerProtectionKey omits the line entirely, which is what an AWG2-era
+// params file looks like to an awg3-configured API.
+func writeAWG3ParamsFile(t *testing.T, path, headerProtectionKey string) {
+	t.Helper()
+	body := `SERVER_PUB_IP=203.0.113.10
+SERVER_PUB_NIC=eth0
+SERVER_AWG_NIC=awg1
+SERVER_AWG_IPV4=10.66.66.1
+SERVER_AWG_IPV6=fd42:42:42::1
+SERVER_PORT=443
+SERVER_PRIV_KEY=server-private-key
+SERVER_PUB_KEY=server-public-key
+CLIENT_DNS_1=1.1.1.1
+CLIENT_DNS_2=1.0.0.1
+ALLOWED_IPS=0.0.0.0/0,::/0
+SERVER_AWG_JC=5
+SERVER_AWG_JMIN=50
+SERVER_AWG_JMAX=1000
+SERVER_AWG_S1=81
+SERVER_AWG_S2=55
+SERVER_AWG_S3=16
+SERVER_AWG_S4=16
+SERVER_AWG_H1=100-200
+SERVER_AWG_H2=300-400
+SERVER_AWG_H3=500-600
+SERVER_AWG_H4=700-800
+AWG_PROFILE=awg3
+SERVER_AWG_CONTENT_PADDING_ADDITION=8-40
+SERVER_AWG_REKEY_AFTER_TIME=100-140
+`
+	if headerProtectionKey != "" {
+		body += "SERVER_AWG_HEADER_PROTECTION_KEY=" + headerProtectionKey + "\n"
+	}
+	if err := os.WriteFile(path, []byte(body), 0600); err != nil {
+		t.Fatalf("writing params file: %v", err)
+	}
+}
+
+func TestAWG3ClientConfigCarriesHeaderProtectionAndKeepsTheAWG2Marker(t *testing.T) {
+	env := setupTestEnv(t)
+	backendType = "amneziawg"
+	AWG_PROFILE = "awg3"
+	wgParams.ServerAWGJC = "5"
+	wgParams.ServerAWGJMin = "50"
+	wgParams.ServerAWGJMax = "1000"
+	wgParams.ServerAWGS1 = "81"
+	wgParams.ServerAWGS2 = "55"
+	wgParams.ServerAWGS3 = "16"
+	wgParams.ServerAWGS4 = "16"
+	wgParams.ServerAWGH1 = "100-200"
+	wgParams.ServerAWGH2 = "300-400"
+	wgParams.ServerAWGH3 = "500-600"
+	wgParams.ServerAWGH4 = "700-800"
+	wgParams.ServerAWGHeaderProtectionKey = "cJ0PBHm9nGZbYpXvR1sKfQ2tLdW8uA6yE3iO5rTgVmc="
+	wgParams.ServerAWGContentPaddingAddition = "8-40"
+	wgParams.ServerAWGRekeyAfterTime = "100-140"
+	wgParams.ServerAWGMaxHandshakeAttempts = "18"
+
+	recorder := env.authedRequest(t, http.MethodPost, "/api/users/add", AddUserRequest{Name: "awg3user"})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("got status %d, body %s", recorder.Code, recorder.Body.String())
+	}
+	var resp struct {
+		Success bool   `json:"success"`
+		Data    Client `json:"data"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+
+	for _, expected := range []string{
+		// The marker stays awg2: VPNProtocolProfileMarker.detect on iOS accepts
+		// only that literal, and the AWG3 keys are additive inside it.
+		awg2ConfigMarker,
+		"S3 = 16",
+		"S4 = 16",
+		"HeaderProtectionKey = cJ0PBHm9nGZbYpXvR1sKfQ2tLdW8uA6yE3iO5rTgVmc=",
+		"ContentPaddingAddition = 8-40",
+		"RekeyAfterTime = 100-140",
+		"MaxHandshakeAttempts = 18",
+	} {
+		if !strings.Contains(resp.Data.Config, expected) {
+			t.Errorf("AWG3 client config missing %q:\n%s", expected, resp.Data.Config)
+		}
+	}
+	for _, unexpected := range []string{"# CHOP-AWG-PROFILE: awg3", "RekeyTimeout", "RejectAfterTime", "KeepaliveTimeout"} {
+		if strings.Contains(resp.Data.Config, unexpected) {
+			t.Errorf("AWG3 client config must not contain %q:\n%s", unexpected, resp.Data.Config)
+		}
+	}
+}
+
+func TestAWG2ClientConfigHasNoAWG3Directives(t *testing.T) {
+	env := setupTestEnv(t)
+	backendType = "amneziawg"
+	AWG_PROFILE = "awg2"
+	wgParams.ServerAWGS3 = "16"
+	wgParams.ServerAWGS4 = "16"
+	wgParams.ServerAWGH1 = "100-200"
+	wgParams.ServerAWGH2 = "300-400"
+	wgParams.ServerAWGH3 = "500-600"
+	wgParams.ServerAWGH4 = "700-800"
+	// Set on purpose: an awg2 node must not leak AWG3 keys even if its params
+	// file carries them.
+	wgParams.ServerAWGHeaderProtectionKey = "cJ0PBHm9nGZbYpXvR1sKfQ2tLdW8uA6yE3iO5rTgVmc="
+	wgParams.ServerAWGContentPaddingAddition = "8-40"
+
+	recorder := env.authedRequest(t, http.MethodPost, "/api/users/add", AddUserRequest{Name: "awg2only"})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("got status %d, body %s", recorder.Code, recorder.Body.String())
+	}
+	var resp struct {
+		Success bool   `json:"success"`
+		Data    Client `json:"data"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+	for _, unexpected := range []string{"HeaderProtectionKey", "ContentPaddingAddition"} {
+		if strings.Contains(resp.Data.Config, unexpected) {
+			t.Errorf("awg2 config must not contain %q:\n%s", unexpected, resp.Data.Config)
+		}
 	}
 }
