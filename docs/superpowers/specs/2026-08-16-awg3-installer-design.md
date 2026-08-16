@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-16
 **Status:** Approved, ready for implementation plan
-**Repo touched:** `wireguard-api-2` (`install2.sh`, `amneziawg-install.sh`, `service.sh`, `main.go`, tests)
+**Repo touched:** `wireguard-api-2` (new `install3.sh`, `amneziawg-install.sh`, `service.sh`, `main.go`, tests)
 
 ## Problem
 
@@ -16,9 +16,9 @@ There is no supported way to install an AWG3 node. This design adds one.
 
 ## Goals
 
-- `sudo ./install2.sh` produces a working AWG3 node end to end: AWG3 interface,
-  AWG3 params file, node API that issues AWG3 client configs.
-- `AWG_PROFILE=awg2 ./install2.sh` reproduces today's behaviour exactly.
+- A new entry point `install3.sh` produces a working AWG3 node end to end: AWG3
+  interface, AWG3 params file, node API that issues AWG3 client configs.
+- `install2.sh` is not edited at all and keeps producing AWG2 nodes.
 - An AWG3 install fails before touching disk if the host's AmneziaWG build
   cannot do header protection.
 
@@ -26,30 +26,50 @@ There is no supported way to install an AWG3 node. This design adds one.
 
 - No in-place AWG2 → AWG3 upgrade script. Existing nodes are untouched by this
   work. (`awg2-sidecar.sh` / `awg2-preflight.sh` stay AWG2-only.)
+- No fork of `amneziawg-install.sh`. Only the thin entry point is duplicated;
+  the 55 KB of OS detection, package install, DKMS, firewall and API wiring stay
+  in one file behind a profile switch.
 - No backend or app change. Which clients are allowed to see an AWG3 node is
   handled by `is_support_awg_third`, specified in
   `backend/docs/superpowers/specs/2026-08-16-awg3-server-gating-design.md`.
 - No change to the client config profile marker. It stays the literal `awg2`.
 
-## Profile selection
+## Entry point
 
-`install2.sh` exports the profile and rejects anything else:
+`install3.sh` is a copy of `install2.sh` with three differences: it prints an
+AmneziaWG 3.0 banner, it exports `AWG_PROFILE=awg3` instead of `awg2`, and it is
+not overridable — the profile is the whole point of the file:
 
 ```bash
-export AWG_PROFILE=${AWG_PROFILE:-awg3}
-case ${AWG_PROFILE} in
-awg2 | awg3) ;;
-*) echo "Unsupported AWG_PROFILE: ${AWG_PROFILE}" >&2; exit 1 ;;
-esac
+export AWG_PROFILE=awg3
+./amneziawg-install.sh
 ```
 
-The banner names the profile being installed. `amneziawg-install.sh` derives one
-switch from it, `AWG3=1` when `AWG_PROFILE=awg3`, and every new behaviour below
-is gated on that switch only.
+Everything else (root check, git bootstrap, clone of
+`WIREGUARD_API_REPOSITORY`/`WIREGUARD_API_REF` into a temp dir, `chmod +x`,
+cleanup trap) is identical, so the published one-liner is the same shape:
+
+```
+curl -sSL https://raw.githubusercontent.com/akromjon/wireguard-api-2/main/install3.sh -o install3.sh
+chmod +x install3.sh
+sudo ./install3.sh
+```
+
+`install2.sh` is not modified. It keeps exporting `AWG_PROFILE=awg2`, so an
+operator who wants an AWG2 node runs exactly what they run today.
+
+`amneziawg-install.sh` derives one switch from the exported profile, `AWG3=1`
+when `AWG_PROFILE=awg3`, and every new behaviour below is gated on that switch
+only. An unset or unrecognised `AWG_PROFILE` is rejected there, so a stray value
+cannot silently install a half-profile.
 
 **Confirmation token.** The interactive guard becomes `INSTALL-AWG3` under
 `AWG3=1` and stays `INSTALL-AWG2` otherwise, so headless callers that export
 `INSTALL_CONFIRMATION=INSTALL-AWG2` (`awg2-sidecar.sh`) keep working unchanged.
+
+**README.** The install section gains the `install3.sh` one-liner beside the
+existing `install2.sh` one, stating that AWG3 nodes serve only iOS 12.3.0+ and
+Android 2.4.2+ clients.
 
 ## Detection of existing interfaces
 
@@ -216,6 +236,9 @@ call site.
   simulated `awg set --help` lacks `header-protection-key`.
 - An `AWG_PROFILE=awg2` run produces the same params and conf content as before
   the change.
+- `install3.sh` exports `AWG_PROFILE=awg3` and otherwise matches `install2.sh`
+  line for line apart from the banner text, asserted by diffing the two files
+  with those lines filtered out.
 
 `main_test.go` gains:
 
@@ -227,10 +250,13 @@ call site.
 
 ## Backward compatibility
 
+- `install2.sh` is not edited. The AWG2 one-liner published today keeps working
+  byte for byte, and nothing about AWG3 can be reached through it.
 - `main.go` and `service.sh` both default to `awg2`. Existing nodes, existing
   params files and existing `.env` files behave exactly as today.
-- The AWG2 install path is unchanged: same prompts, same ranges, same
-  `INSTALL-AWG2` token, same conf and params content.
+- The AWG2 install path through the shared `amneziawg-install.sh` is unchanged:
+  same prompts, same ranges, same `INSTALL-AWG2` token, same conf and params
+  content.
 - Client configs from an AWG3 node keep the `awg2` marker, so pre-12.3.0 apps
   parse them successfully but cannot complete a handshake against a
   header-protected node. That gap is closed by the backend
@@ -239,7 +265,7 @@ call site.
 - An old node binary reading a new AWG3 params file would ignore the unknown
   keys and issue AWG2 configs against an AWG3 interface — a node that accepts
   nobody. The release asset carrying these `main.go` changes must therefore be
-  published **before** the first `install2.sh` AWG3 run, since `service.sh`
+  published **before** the first `install3.sh` run, since `service.sh`
   downloads the latest release. Note the repo's tag-overwrite release flow: the
   same tag is re-pushed, so confirm the asset timestamp before installing.
 - The 20 nodes with a stale `WG_PARAMS_FILE` are unaffected; nothing in this
