@@ -290,17 +290,31 @@ fi
 grep -qx 'export AWG_PROFILE=awg3' "${SCRIPT_DIR}/install3.sh" || fail "install3.sh must export the awg3 profile"
 grep -qx 'export AWG_PROFILE=awg2' "${SCRIPT_DIR}/install2.sh" || fail "install2.sh must keep exporting awg2"
 
-# The two entry points must not drift on the machinery that actually installs
-# anything. Compared line by line rather than by diff, because the banners and
-# comments legitimately differ.
-while IFS= read -r shared_line; do
-	grep -qxF "${shared_line}" "${SCRIPT_DIR}/install3.sh" ||
-		fail "install3.sh is missing install2.sh machinery: ${shared_line}"
-done < <(grep -E 'REPOSITORY|WIREGUARD_API_REF|mktemp|rm -rf|trap cleanup|git clone|chmod \+x|EUID|apt-get install -y git|\./amneziawg-install\.sh' "${SCRIPT_DIR}/install2.sh")
+# The two entry points must stay byte-identical outside four permitted
+# regions: the opening banner, the profile comment block, the
+# `export AWG_PROFILE=` line, and the closing banner. A regex allowlist of
+# "known machinery lines" was tried first (mktemp, git clone, chmod +x, ...)
+# and missed real drift: it only asserts that install3.sh contains whatever
+# matches the allowlist in install2.sh, so a line absent from the allowlist
+# — `set -Eeuo pipefail`, the `cd "${TEMP_DIR}/source"` target, the
+# `command -v git` fallback block, the root-check error text — could be
+# deleted or edited in install3.sh and the check would still pass. Strip only
+# the permitted-different regions from both files and diff what remains:
+# anything left over must match exactly, including whitespace.
+strip_install_entrypoint_variants() {
+	awk 'NR == 1 || $0 !~ /^#/' "$1" |
+		grep -Ev 'AmneziaWG [0-9]+\.[0-9]+' |
+		grep -v '^export AWG_PROFILE=awg'
+}
+diff <(strip_install_entrypoint_variants "${SCRIPT_DIR}/install2.sh") \
+	<(strip_install_entrypoint_variants "${SCRIPT_DIR}/install3.sh") >/dev/null ||
+	fail "install3.sh diverges from install2.sh outside the banner/profile lines"
 
 grep -q 'AmneziaWG 3.0' "${SCRIPT_DIR}/install3.sh" || fail "install3.sh must name the profile it installs"
-# Written as an if, not `grep && fail`: under `set -e` a failing grep on the
-# left of && would abort the whole test run.
+# Written as an if, not `grep && fail`, matching the negative-assertion style
+# used elsewhere in this file. (A non-final command in an `&&` list is
+# actually exempt from errexit, so `grep ... && fail ...` would not abort the
+# run either — this is a style choice, not a safety requirement.)
 if grep -q 'AWG_PROFILE=awg3' "${SCRIPT_DIR}/install2.sh"; then
 	fail "install2.sh must not reference awg3"
 fi
