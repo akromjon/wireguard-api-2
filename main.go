@@ -1533,6 +1533,30 @@ func createWireGuardClientLocked(name, ipv4, ipv6 string, keys clientKeys) (stri
 				}
 			}
 		}
+
+		if isAWG3Profile() {
+			if wgParams.ServerAWGHeaderProtectionKey != "" {
+				interfaceLines = append(interfaceLines,
+					fmt.Sprintf("HeaderProtectionKey = %s", wgParams.ServerAWGHeaderProtectionKey))
+			}
+			for _, field := range []struct {
+				name  string
+				value string
+			}{
+				{name: "ContentPaddingAddition", value: wgParams.ServerAWGContentPaddingAddition},
+				{name: "RekeyAfterTime", value: wgParams.ServerAWGRekeyAfterTime},
+				{name: "RekeyTimeout", value: wgParams.ServerAWGRekeyTimeout},
+				{name: "RejectAfterTime", value: wgParams.ServerAWGRejectAfterTime},
+				{name: "KeepaliveTimeout", value: wgParams.ServerAWGKeepaliveTimeout},
+				{name: "MaxHandshakeAttempts", value: wgParams.ServerAWGMaxHandshakeAttempts},
+			} {
+				// Unset timing ranges are omitted so the client falls back to
+				// its own defaults instead of parsing an empty value.
+				if field.value != "" {
+					interfaceLines = append(interfaceLines, fmt.Sprintf("%s = %s", field.name, field.value))
+				}
+			}
+		}
 	}
 
 	// PersistentKeepalive keeps the client's NAT mapping alive while the

@@ -1322,3 +1322,90 @@ SERVER_AWG_REKEY_AFTER_TIME=100-140
 		t.Fatalf("writing params file: %v", err)
 	}
 }
+
+func TestAWG3ClientConfigCarriesHeaderProtectionAndKeepsTheAWG2Marker(t *testing.T) {
+	env := setupTestEnv(t)
+	backendType = "amneziawg"
+	AWG_PROFILE = "awg3"
+	wgParams.ServerAWGJC = "5"
+	wgParams.ServerAWGJMin = "50"
+	wgParams.ServerAWGJMax = "1000"
+	wgParams.ServerAWGS1 = "81"
+	wgParams.ServerAWGS2 = "55"
+	wgParams.ServerAWGS3 = "16"
+	wgParams.ServerAWGS4 = "16"
+	wgParams.ServerAWGH1 = "100-200"
+	wgParams.ServerAWGH2 = "300-400"
+	wgParams.ServerAWGH3 = "500-600"
+	wgParams.ServerAWGH4 = "700-800"
+	wgParams.ServerAWGHeaderProtectionKey = "cJ0PBHm9nGZbYpXvR1sKfQ2tLdW8uA6yE3iO5rTgVmc="
+	wgParams.ServerAWGContentPaddingAddition = "8-40"
+	wgParams.ServerAWGRekeyAfterTime = "100-140"
+	wgParams.ServerAWGMaxHandshakeAttempts = "18"
+
+	recorder := env.authedRequest(t, http.MethodPost, "/api/users/add", AddUserRequest{Name: "awg3user"})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("got status %d, body %s", recorder.Code, recorder.Body.String())
+	}
+	var resp struct {
+		Success bool   `json:"success"`
+		Data    Client `json:"data"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+
+	for _, expected := range []string{
+		// The marker stays awg2: VPNProtocolProfileMarker.detect on iOS accepts
+		// only that literal, and the AWG3 keys are additive inside it.
+		awg2ConfigMarker,
+		"S3 = 16",
+		"S4 = 16",
+		"HeaderProtectionKey = cJ0PBHm9nGZbYpXvR1sKfQ2tLdW8uA6yE3iO5rTgVmc=",
+		"ContentPaddingAddition = 8-40",
+		"RekeyAfterTime = 100-140",
+		"MaxHandshakeAttempts = 18",
+	} {
+		if !strings.Contains(resp.Data.Config, expected) {
+			t.Errorf("AWG3 client config missing %q:\n%s", expected, resp.Data.Config)
+		}
+	}
+	for _, unexpected := range []string{"# CHOP-AWG-PROFILE: awg3", "RekeyTimeout", "RejectAfterTime", "KeepaliveTimeout"} {
+		if strings.Contains(resp.Data.Config, unexpected) {
+			t.Errorf("AWG3 client config must not contain %q:\n%s", unexpected, resp.Data.Config)
+		}
+	}
+}
+
+func TestAWG2ClientConfigHasNoAWG3Directives(t *testing.T) {
+	env := setupTestEnv(t)
+	backendType = "amneziawg"
+	AWG_PROFILE = "awg2"
+	wgParams.ServerAWGS3 = "16"
+	wgParams.ServerAWGS4 = "16"
+	wgParams.ServerAWGH1 = "100-200"
+	wgParams.ServerAWGH2 = "300-400"
+	wgParams.ServerAWGH3 = "500-600"
+	wgParams.ServerAWGH4 = "700-800"
+	// Set on purpose: an awg2 node must not leak AWG3 keys even if its params
+	// file carries them.
+	wgParams.ServerAWGHeaderProtectionKey = "cJ0PBHm9nGZbYpXvR1sKfQ2tLdW8uA6yE3iO5rTgVmc="
+	wgParams.ServerAWGContentPaddingAddition = "8-40"
+
+	recorder := env.authedRequest(t, http.MethodPost, "/api/users/add", AddUserRequest{Name: "awg2only"})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("got status %d, body %s", recorder.Code, recorder.Body.String())
+	}
+	var resp struct {
+		Success bool   `json:"success"`
+		Data    Client `json:"data"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+	for _, unexpected := range []string{"HeaderProtectionKey", "ContentPaddingAddition"} {
+		if strings.Contains(resp.Data.Config, unexpected) {
+			t.Errorf("awg2 config must not contain %q:\n%s", unexpected, resp.Data.Config)
+		}
+	}
+}
