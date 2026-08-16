@@ -603,6 +603,75 @@ function generateS3AndS4() {
 	RANDOM_AWG_S4=$(shuf -i"${s4_floor}-32" -n1)
 }
 
+# 32 random bytes, base64 — the same shape `awg genkey` produces. Generated
+# from /dev/urandom rather than the AmneziaWG tools so it works before the
+# packages are installed and stays testable off a node.
+function generateHeaderProtectionKey() {
+	if [[ -n ${SERVER_AWG_HEADER_PROTECTION_KEY:-} ]]; then
+		return
+	fi
+	SERVER_AWG_HEADER_PROTECTION_KEY=$(head -c 32 /dev/urandom | base64 | tr -d '\n')
+}
+
+# Extra payload padding on top of S4. Kept small on purpose: S4 already grows
+# every transport packet, and the MTU/packet-size question from the AWG2
+# migration is still open.
+function generateContentPaddingAddition() {
+	if [[ -n ${SERVER_AWG_CONTENT_PADDING_ADDITION:-} ]]; then
+		return
+	fi
+	local low
+	low=$(shuf -i1-16 -n1)
+	SERVER_AWG_CONTENT_PADDING_ADDITION="${low}-$((low + $(shuf -i8-48 -n1)))"
+}
+
+# Emits the AWG3 timing directives an operator exported, one per line, and
+# nothing at all when none were. These are never generated or prompted for:
+# randomising rekey and keepalive timing would shift the reconnect behaviour
+# the sleep/wake path depends on.
+function awg3_timing_directives() {
+	local pair name var
+	for pair in \
+		"RekeyAfterTime:SERVER_AWG_REKEY_AFTER_TIME" \
+		"RekeyTimeout:SERVER_AWG_REKEY_TIMEOUT" \
+		"RejectAfterTime:SERVER_AWG_REJECT_AFTER_TIME" \
+		"KeepaliveTimeout:SERVER_AWG_KEEPALIVE_TIMEOUT" \
+		"MaxHandshakeAttempts:SERVER_AWG_MAX_HANDSHAKE_ATTEMPTS"; do
+		name=${pair%%:*}
+		var=${pair##*:}
+		if [[ -n ${!var:-} ]]; then
+			echo "${name} = ${!var}"
+		fi
+	done
+	return 0
+}
+
+function awg3_module_version_ok() {
+	local version=$1
+	[[ ${version} =~ ^([0-9]+) ]] || return 1
+	((BASH_REMATCH[1] >= 3))
+}
+
+# AWG3 needs a 3.0 module and userspace. Called after the packages are
+# installed and before anything is written to disk, so a node that cannot do
+# header protection is left exactly as it was.
+function assert_awg3_supported() {
+	local module_version=""
+	if [[ -r /sys/module/amneziawg/version ]]; then
+		module_version=$(</sys/module/amneziawg/version)
+	fi
+	if awg3_module_version_ok "${module_version}"; then
+		return 0
+	fi
+	if awg set --help 2>&1 | grep -q 'header-protection-key'; then
+		return 0
+	fi
+	echo -e "${RED}This host's AmneziaWG build does not support header protection.${NC}" >&2
+	echo -e "${ORANGE}Loaded module version: ${module_version:-unknown}; AWG3 needs 3.0 or newer.${NC}" >&2
+	echo -e "${ORANGE}Upgrade the Amnezia PPA packages (apt update && apt install --only-upgrade amneziawg-dkms amneziawg-tools), reboot, then rerun install3.sh.${NC}" >&2
+	return 1
+}
+
 # Validates an S3/S4 padding answer. Extracted so the prompt guard is
 # testable without driving an interactive read.
 function s_padding_in_range() {
@@ -896,6 +965,11 @@ function installQuestions() {
 	readS3AndS4
 	readIParams
 
+	if ((AWG3 == 1)); then
+		generateHeaderProtectionKey
+		generateContentPaddingAddition
+	fi
+
 	echo ""
 	echo "${AWG_PROFILE^^} installation summary:"
 	echo "  Existing interfaces: ${EXISTING_AWG_INTERFACES[*]:-none} (unchanged)"
@@ -912,6 +986,11 @@ function installQuestions() {
 	fi
 	echo "  New params file: ${SERVER_PARAMS_FILE}"
 	echo "  New clients directory: ${AWG_CLIENTS_DIR}"
+	if ((AWG3 == 1)); then
+		echo "  Header protection: enabled (per-node key)"
+		echo "  Content padding addition: ${SERVER_AWG_CONTENT_PADDING_ADDITION}"
+		echo "  Serves iOS 12.3.0+ and Android 2.4.2+ clients only"
+	fi
 	echo ""
 	validate_installation_choices || exit 1
 	if [[ -z ${INSTALL_CONFIRMATION:-} ]]; then
@@ -1011,6 +1090,10 @@ function installAmneziaWG() {
 		dnf install -y amneziawg-dkms amneziawg-tools iptables
 	fi
 
+	if ((AWG3 == 1)) && ! assert_awg3_supported; then
+		exit 1
+	fi
+
 	# Create AmneziaWG directory if it doesn't exist
 	mkdir -p "${AMNEZIAWG_DIR}"
 	chmod 700 "${AMNEZIAWG_DIR}"
@@ -1043,20 +1126,32 @@ SERVER_AWG_H1=${SERVER_AWG_H1}
 SERVER_AWG_H2=${SERVER_AWG_H2}
 SERVER_AWG_H3=${SERVER_AWG_H3}
 SERVER_AWG_H4=${SERVER_AWG_H4}
-AWG_PROFILE=awg2" >"${SERVER_PARAMS_FILE}"
+AWG_PROFILE=${AWG_PROFILE}" >"${SERVER_PARAMS_FILE}"
 	chmod 600 "${SERVER_PARAMS_FILE}"
 	printf "SERVER_AWG_I1='%s'\n" "${SERVER_AWG_I1}" >>"${SERVER_PARAMS_FILE}"
 	printf "SERVER_AWG_I2='%s'\n" "${SERVER_AWG_I2}" >>"${SERVER_PARAMS_FILE}"
 	printf "SERVER_AWG_I3='%s'\n" "${SERVER_AWG_I3}" >>"${SERVER_PARAMS_FILE}"
 	printf "SERVER_AWG_I4='%s'\n" "${SERVER_AWG_I4}" >>"${SERVER_PARAMS_FILE}"
 	printf "SERVER_AWG_I5='%s'\n" "${SERVER_AWG_I5}" >>"${SERVER_PARAMS_FILE}"
+	if ((AWG3 == 1)); then
+		printf 'SERVER_AWG_HEADER_PROTECTION_KEY=%s\n' "${SERVER_AWG_HEADER_PROTECTION_KEY}" >>"${SERVER_PARAMS_FILE}"
+		printf 'SERVER_AWG_CONTENT_PADDING_ADDITION=%s\n' "${SERVER_AWG_CONTENT_PADDING_ADDITION}" >>"${SERVER_PARAMS_FILE}"
+		local timing_var
+		for timing_var in SERVER_AWG_REKEY_AFTER_TIME SERVER_AWG_REKEY_TIMEOUT \
+			SERVER_AWG_REJECT_AFTER_TIME SERVER_AWG_KEEPALIVE_TIMEOUT \
+			SERVER_AWG_MAX_HANDSHAKE_ATTEMPTS; do
+			if [[ -n ${!timing_var:-} ]]; then
+				printf '%s=%s\n' "${timing_var}" "${!timing_var}" >>"${SERVER_PARAMS_FILE}"
+			fi
+		done
+	fi
 
 	# Add server interface
 	echo "[Interface]
 Address = ${SERVER_AWG_IPV4}/16,${SERVER_AWG_IPV6}/64
 ListenPort = ${SERVER_PORT}
 PrivateKey = ${SERVER_PRIV_KEY}
-# CHOP-AWG-PROFILE: awg2
+# CHOP-AWG-PROFILE: ${AWG_PROFILE}
 Jc = ${SERVER_AWG_JC}
 Jmin = ${SERVER_AWG_JMIN}
 Jmax = ${SERVER_AWG_JMAX}
@@ -1074,6 +1169,15 @@ H4 = ${SERVER_AWG_H4}" >"${SERVER_AWG_CONF}"
 	[[ -n ${SERVER_AWG_I3} ]] && echo "I3 = ${SERVER_AWG_I3}" >>"${SERVER_AWG_CONF}"
 	[[ -n ${SERVER_AWG_I4} ]] && echo "I4 = ${SERVER_AWG_I4}" >>"${SERVER_AWG_CONF}"
 	[[ -n ${SERVER_AWG_I5} ]] && echo "I5 = ${SERVER_AWG_I5}" >>"${SERVER_AWG_CONF}"
+
+	if ((AWG3 == 1)); then
+		# Inline base64, exactly like PrivateKey. The file-path form of this
+		# key applies to `awg set`, not to conf files.
+		echo "HeaderProtectionKey = ${SERVER_AWG_HEADER_PROTECTION_KEY}" >>"${SERVER_AWG_CONF}"
+		[[ -n ${SERVER_AWG_CONTENT_PADDING_ADDITION} ]] &&
+			echo "ContentPaddingAddition = ${SERVER_AWG_CONTENT_PADDING_ADDITION}" >>"${SERVER_AWG_CONF}"
+		awg3_timing_directives >>"${SERVER_AWG_CONF}"
+	fi
 
 	if pgrep firewalld; then
 		FIREWALLD_IPV4_ADDRESS=$(echo "${SERVER_AWG_IPV4}" | cut -d"." -f1-2)".0.0"
@@ -1103,11 +1207,11 @@ PostDown = ip6tables -t nat -D POSTROUTING -o ${SERVER_PUB_NIC} -j MASQUERADE" >
 	# This catches an outdated userspace tool early instead of leaving a broken
 	# interface behind after installation.
 	if ! command -v awg-quick >/dev/null 2>&1; then
-		echo -e "${RED}AmneziaWG awg-quick was not installed; cannot validate AWG2 config.${NC}"
+		echo -e "${RED}AmneziaWG awg-quick was not installed; cannot validate ${AWG_PROFILE} config.${NC}"
 		exit 1
 	fi
 	if ! awg-quick strip "${SERVER_AWG_NIC}" >/dev/null; then
-		echo -e "${RED}Installed AmneziaWG tools rejected the AWG2 config.${NC}"
+		echo -e "${RED}Installed AmneziaWG tools rejected the ${AWG_PROFILE} config.${NC}"
 		echo -e "${ORANGE}Upgrade the AmneziaWG userspace tools/kernel package and rerun on a clean VPS.${NC}"
 		exit 1
 	fi

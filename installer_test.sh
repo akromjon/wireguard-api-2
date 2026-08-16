@@ -89,6 +89,71 @@ done
 	done
 ) || exit 1
 
+(
+	AWG3=1
+	unset SERVER_AWG_HEADER_PROTECTION_KEY SERVER_AWG_CONTENT_PADDING_ADDITION
+	generateHeaderProtectionKey
+	# 32 raw bytes base64-encoded is always 44 characters ending in '='.
+	[[ ${#SERVER_AWG_HEADER_PROTECTION_KEY} == 44 ]] ||
+		fail "header protection key must be 32 bytes of base64, got '${SERVER_AWG_HEADER_PROTECTION_KEY}'"
+	[[ ${SERVER_AWG_HEADER_PROTECTION_KEY} =~ ^[A-Za-z0-9+/]{43}=$ ]] ||
+		fail "header protection key is not valid base64: ${SERVER_AWG_HEADER_PROTECTION_KEY}"
+	# Arithmetic comparison, not [[ == ]]: BSD wc -c (macOS) right-pads its
+	# count with leading spaces, unlike GNU wc, and would fail a string match.
+	(($(printf '%s' "${SERVER_AWG_HEADER_PROTECTION_KEY}" | base64 -d | wc -c) == 32)) ||
+		fail "header protection key must decode to 32 bytes"
+
+	first=${SERVER_AWG_HEADER_PROTECTION_KEY}
+	unset SERVER_AWG_HEADER_PROTECTION_KEY
+	generateHeaderProtectionKey
+	[[ ${SERVER_AWG_HEADER_PROTECTION_KEY} != "${first}" ]] ||
+		fail "header protection key must be random per node"
+
+	SERVER_AWG_HEADER_PROTECTION_KEY=operator-supplied-key
+	generateHeaderProtectionKey
+	[[ ${SERVER_AWG_HEADER_PROTECTION_KEY} == operator-supplied-key ]] ||
+		fail "an exported header protection key must be honoured"
+) || exit 1
+
+(
+	AWG3=1
+	unset SERVER_AWG_CONTENT_PADDING_ADDITION
+	generateContentPaddingAddition
+	[[ ${SERVER_AWG_CONTENT_PADDING_ADDITION} =~ ^([0-9]+)-([0-9]+)$ ]] ||
+		fail "content padding addition must be a min-max range, got '${SERVER_AWG_CONTENT_PADDING_ADDITION}'"
+	low=${BASH_REMATCH[1]}
+	high=${BASH_REMATCH[2]}
+	((low >= 1)) || fail "content padding minimum must be at least 1"
+	((high > low)) || fail "content padding range must be ordered"
+	# S4 already pads every transport packet; a large content padding addition
+	# on top of it compounds the open MTU question.
+	((high <= 64)) || fail "content padding maximum ${high} is too large"
+) || exit 1
+
+awg3_module_version_ok "3.0.20260805" || fail "module 3.0 must satisfy the awg3 preflight"
+awg3_module_version_ok "4.1.0" || fail "a future major version must satisfy the awg3 preflight"
+if awg3_module_version_ok "2.0.20250101"; then
+	fail "module 2.0 must fail the awg3 preflight"
+fi
+if awg3_module_version_ok ""; then
+	fail "an unreadable module version must fail the awg3 preflight"
+fi
+
+(
+	SERVER_AWG_REKEY_AFTER_TIME=100-140
+	SERVER_AWG_MAX_HANDSHAKE_ATTEMPTS=18
+	unset SERVER_AWG_REKEY_TIMEOUT SERVER_AWG_REJECT_AFTER_TIME SERVER_AWG_KEEPALIVE_TIMEOUT
+	directives=$(awg3_timing_directives)
+	[[ ${directives} == *"RekeyAfterTime = 100-140"* ]] || fail "exported timing ranges must be emitted"
+	[[ ${directives} == *"MaxHandshakeAttempts = 18"* ]] || fail "exported handshake attempts must be emitted"
+	[[ ${directives} != *"RekeyTimeout"* ]] || fail "unset timing ranges must be omitted"
+	[[ ${directives} != *"KeepaliveTimeout"* ]] || fail "unset timing ranges must be omitted"
+) || exit 1
+
+# A stale bash on the node must not turn the preflight into a no-op: the gate
+# has to be reachable as a function, not only inline in installAmneziaWG.
+declare -F assert_awg3_supported >/dev/null || fail "assert_awg3_supported must be a function"
+
 h_spec_bounds "5" || fail "single H value should be valid"
 h_spec_bounds "5-10" || fail "H range should be valid"
 if h_spec_bounds "4"; then
