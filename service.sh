@@ -30,12 +30,21 @@ UPGRADE_EXISTING_SERVICE=${UPGRADE_EXISTING_SERVICE:-false}
 UPGRADE_BACKUP_DIR=""
 UPGRADE_ROLLBACK_ARMED=0
 
+# Which AmneziaWG profile this node's API generates client configs for. The
+# default stays awg2 so running service.sh directly on an existing node keeps
+# its behaviour; install3.sh exports awg3.
+AWG_PROFILE=${AWG_PROFILE:-awg2}
+
 if [[ ! ${SERVICE_NAME} =~ ^[a-zA-Z0-9_.@-]+\.service$ ]]; then
 	echo "Invalid systemd service name: ${SERVICE_NAME}" >&2
 	exit 1
 fi
-if [[ ! ${API_PORT} =~ ^[0-9]+$ ]] || (( API_PORT < 1 || API_PORT > 65535 )); then
+if [[ ! ${API_PORT} =~ ^[0-9]+$ ]] || ((API_PORT < 1 || API_PORT > 65535)); then
 	echo "Invalid API port: ${API_PORT}" >&2
+	exit 1
+fi
+if [[ ${AWG_PROFILE} != awg2 && ${AWG_PROFILE} != awg3 ]]; then
+	echo "Invalid AWG_PROFILE: ${AWG_PROFILE} (expected awg2 or awg3)" >&2
 	exit 1
 fi
 
@@ -72,13 +81,16 @@ rollback_failed_upgrade() {
 trap rollback_failed_upgrade EXIT
 
 case "$(uname -sm)" in
-	"Darwin x86_64") FILENAME="wireguard-darwin-amd64" ;;
-	"Darwin arm64") FILENAME="wireguard-darwin-arm64" ;;
-	"Linux x86_64") FILENAME="wireguard-linux-amd64" ;;
-	"Linux i686") FILENAME="wireguard-linux-386" ;;
-	"Linux armv7l") FILENAME="wireguard-linux-arm" ;;
-	"Linux aarch64") FILENAME="wireguard-linux-arm64" ;;
-	*) echo "Unsupported architecture: $(uname -sm)" >&2; exit 1 ;;
+"Darwin x86_64") FILENAME="wireguard-darwin-amd64" ;;
+"Darwin arm64") FILENAME="wireguard-darwin-arm64" ;;
+"Linux x86_64") FILENAME="wireguard-linux-amd64" ;;
+"Linux i686") FILENAME="wireguard-linux-386" ;;
+"Linux armv7l") FILENAME="wireguard-linux-arm" ;;
+"Linux aarch64") FILENAME="wireguard-linux-arm64" ;;
+*)
+	echo "Unsupported architecture: $(uname -sm)" >&2
+	exit 1
+	;;
 esac
 
 install_binary() (
@@ -143,7 +155,7 @@ prepare_environment() {
 
 	set_env_value API_PORT "${API_PORT}"
 	API_TOKEN=${current_api_token}
-	set_env_value AWG_PROFILE awg2
+	set_env_value AWG_PROFILE "${AWG_PROFILE}"
 	set_env_value WG_CONFIG_FILE "${WG_CONFIG_FILE}"
 	set_env_value WG_PARAMS_FILE "${WG_PARAMS_FILE}"
 	set_env_value WIREGUARD_CLIENTS "${WIREGUARD_CLIENTS}"
@@ -195,14 +207,14 @@ verify_token_context() {
 	local response attempt
 	for ((attempt = 1; attempt <= 10; attempt++)); do
 		response=$(curl -fsS --max-time 2 -H "key: ${api_token}" "http://127.0.0.1:${API_PORT}/api/health" || true)
-		if [[ ${response} == *'"success":true'* && ${response} == *'"interface":"'"${expected_interface}"'"'* && ${response} == *'"profile":"awg2"'* ]]; then
-			echo "Verified ${SERVICE_NAME} serves ${expected_interface} with AWG2 on TCP ${API_PORT}."
+		if [[ ${response} == *'"success":true'* && ${response} == *'"interface":"'"${expected_interface}"'"'* && ${response} == *'"profile":"'"${AWG_PROFILE}"'"'* ]]; then
+			echo "Verified ${SERVICE_NAME} serves ${expected_interface} with ${AWG_PROFILE} on TCP ${API_PORT}."
 			return 0
 		fi
 		sleep 1
 	done
 
-	echo "API verification failed: ${SERVICE_NAME} did not serve ${expected_interface} with AWG2 on TCP ${API_PORT}." >&2
+	echo "API verification failed: ${SERVICE_NAME} did not serve ${expected_interface} with ${AWG_PROFILE} on TCP ${API_PORT}." >&2
 	return 1
 }
 

@@ -1192,6 +1192,7 @@ net.ipv6.conf.all.forwarding = 1" >/etc/sysctl.d/awg.conf
 	echo -e "\n${GREEN}Installing WireGuard API...${NC}"
 	if [[ ${REUSE_EXISTING_API} == 1 ]]; then
 		if ! AWG_INTERFACE="${SERVER_AWG_NIC}" \
+			AWG_PROFILE="${AWG_PROFILE}" \
 			INSTALL_BINARY="${API_BINARY_PATH}" \
 			CONFIG_DIR="${API_CONFIG_DIR}" \
 			SERVICE_NAME="${API_SERVICE_NAME}" \
@@ -1206,6 +1207,7 @@ net.ipv6.conf.all.forwarding = 1" >/etc/sysctl.d/awg.conf
 		fi
 	else
 		if ! AWG_INTERFACE="${SERVER_AWG_NIC}" \
+			AWG_PROFILE="${AWG_PROFILE}" \
 			INSTALL_BINARY="${API_BINARY_PATH}" \
 			CONFIG_DIR="${API_CONFIG_DIR}" \
 			SERVICE_NAME="${API_SERVICE_NAME}" \

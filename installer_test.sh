@@ -156,4 +156,33 @@ grep -qx "WG_CONFIG_FILE=${WG_CONFIG_FILE}" "${CONFIG_DIR}/.env" || fail "API sh
 grep -qx "WG_PARAMS_FILE=${WG_PARAMS_FILE}" "${CONFIG_DIR}/.env" || fail "API should target the AWG2 params"
 grep -qx "WIREGUARD_CLIENTS=${WIREGUARD_CLIENTS}" "${CONFIG_DIR}/.env" || fail "API should target the AWG2 clients directory"
 
+grep -qx 'AWG_PROFILE=awg2' "${CONFIG_DIR}/.env" || fail "service.sh must default the profile to awg2"
+
+# An awg3 install must hand the node API its profile, or the API keeps issuing
+# AWG2 configs against a header-protected interface — a node nobody can reach.
+(
+	AWG_PROFILE=awg3
+	CONFIG_DIR="${TEST_AWG_DIR}/wireguard-api-awg3"
+	WG_CONFIG_FILE="${TEST_AWG_DIR}/awg1.conf"
+	WG_PARAMS_FILE="${TEST_AWG_DIR}/params.awg1"
+	WIREGUARD_CLIENTS="${TEST_AWG_DIR}/users-awg1"
+	mkdir -p "${CONFIG_DIR}"
+	printf '%s\n' 'API_PORT=8080' 'API_TOKEN=legacy-api-token-1234567890' >"${CONFIG_DIR}/.env"
+	# shellcheck source=service.sh
+	source "${SCRIPT_DIR}/service.sh"
+	prepare_environment
+	grep -qx 'AWG_PROFILE=awg3' "${CONFIG_DIR}/.env"
+) || fail "service.sh must record AWG_PROFILE=awg3 for an awg3 install"
+
+# Written as an if, not `( ... ) && fail`: the subshell is expected to exit
+# non-zero, and under `set -e` that would abort the whole test run.
+if (
+	AWG_PROFILE=awg9
+	CONFIG_DIR="${TEST_AWG_DIR}/wireguard-api-bad"
+	mkdir -p "${CONFIG_DIR}"
+	source "${SCRIPT_DIR}/service.sh" 2>/dev/null
+); then
+	fail "service.sh must reject an unknown AWG_PROFILE"
+fi
+
 echo "installer parameter and coexistence tests passed"
