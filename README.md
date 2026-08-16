@@ -50,6 +50,20 @@ traffic during rotation.
 stable entry point and accepts `WIREGUARD_API_REPOSITORY` and
 `WIREGUARD_API_REF` for canary testing.
 
+### AmneziaWG 3.0 node
+
+```bash
+curl -sSL https://raw.githubusercontent.com/akromjon/wireguard-api-2/main/install3.sh -o install3.sh
+chmod +x install3.sh
+sudo ./install3.sh
+```
+
+An AWG3 node enables header protection, so only iOS 12.3.0+ and Android 2.4.2+
+clients can connect to it. Set `is_support_awg_third` on the server record when
+you register it, or older clients will be handed a config they cannot use.
+Requires an AmneziaWG 3.0 module; the installer checks and refuses to continue
+otherwise. `install2.sh` still installs an AWG2 node and is unchanged.
+
 ## AWG2 configuration
 
 The installer asks for the AmneziaWG parameters and writes the same values to

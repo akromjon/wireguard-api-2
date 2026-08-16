@@ -286,4 +286,23 @@ if (
 	fail "service.sh must reject an unknown AWG_PROFILE"
 fi
 
+[[ -x ${SCRIPT_DIR}/install3.sh ]] || fail "install3.sh must exist and be executable"
+grep -qx 'export AWG_PROFILE=awg3' "${SCRIPT_DIR}/install3.sh" || fail "install3.sh must export the awg3 profile"
+grep -qx 'export AWG_PROFILE=awg2' "${SCRIPT_DIR}/install2.sh" || fail "install2.sh must keep exporting awg2"
+
+# The two entry points must not drift on the machinery that actually installs
+# anything. Compared line by line rather than by diff, because the banners and
+# comments legitimately differ.
+while IFS= read -r shared_line; do
+	grep -qxF "${shared_line}" "${SCRIPT_DIR}/install3.sh" ||
+		fail "install3.sh is missing install2.sh machinery: ${shared_line}"
+done < <(grep -E 'REPOSITORY|WIREGUARD_API_REF|mktemp|rm -rf|trap cleanup|git clone|chmod \+x|EUID|apt-get install -y git|\./amneziawg-install\.sh' "${SCRIPT_DIR}/install2.sh")
+
+grep -q 'AmneziaWG 3.0' "${SCRIPT_DIR}/install3.sh" || fail "install3.sh must name the profile it installs"
+# Written as an if, not `grep && fail`: under `set -e` a failing grep on the
+# left of && would abort the whole test run.
+if grep -q 'AWG_PROFILE=awg3' "${SCRIPT_DIR}/install2.sh"; then
+	fail "install2.sh must not reference awg3"
+fi
+
 echo "installer parameter and coexistence tests passed"
