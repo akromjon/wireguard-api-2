@@ -450,7 +450,7 @@ func loadWGParams() error {
 		}
 		if len(missing) > 0 {
 			sort.Strings(missing)
-			return fmt.Errorf("required AWG2 parameters missing: %s", strings.Join(missing, ", "))
+			return fmt.Errorf("required %s parameters missing: %s", strings.ToUpper(AWG_PROFILE), strings.Join(missing, ", "))
 		}
 		if err := validateAWG2Params(wgParams); err != nil {
 			return err
@@ -568,9 +568,23 @@ func validateAWG3Params(params WGParams) error {
 		}
 	}
 
-	if err := validateAWGRange(params.ServerAWGContentPaddingAddition); err != nil {
-		return fmt.Errorf("invalid AWG3 SERVER_AWG_CONTENT_PADDING_ADDITION %q: %v",
-			params.ServerAWGContentPaddingAddition, err)
+	// ContentPaddingAddition and the five timing values all reach client
+	// configs verbatim (see the emission block below); every one of them
+	// must be validated here, not just the one that historically was.
+	for _, timing := range []struct {
+		name  string
+		value string
+	}{
+		{name: "SERVER_AWG_CONTENT_PADDING_ADDITION", value: params.ServerAWGContentPaddingAddition},
+		{name: "SERVER_AWG_REKEY_AFTER_TIME", value: params.ServerAWGRekeyAfterTime},
+		{name: "SERVER_AWG_REKEY_TIMEOUT", value: params.ServerAWGRekeyTimeout},
+		{name: "SERVER_AWG_REJECT_AFTER_TIME", value: params.ServerAWGRejectAfterTime},
+		{name: "SERVER_AWG_KEEPALIVE_TIMEOUT", value: params.ServerAWGKeepaliveTimeout},
+		{name: "SERVER_AWG_MAX_HANDSHAKE_ATTEMPTS", value: params.ServerAWGMaxHandshakeAttempts},
+	} {
+		if err := validateAWGRange(timing.value); err != nil {
+			return fmt.Errorf("invalid AWG3 %s %q: %v", timing.name, timing.value, err)
+		}
 	}
 	return nil
 }
