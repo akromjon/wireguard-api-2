@@ -64,6 +64,21 @@ you register it, or older clients will be handed a config they cannot use.
 Requires an AmneziaWG 3.0 module; the installer checks and refuses to continue
 otherwise. `install2.sh` still installs an AWG2 node and is unchanged.
 
+**Adding AWG3 beside an already-registered node.** If a legacy or AWG2
+interface already exists on the host, `install3.sh` reuses that node's
+running API instead of creating a new one: same TCP port, same API token,
+same backend server record. That is the only path an operator is likely to
+run, since most fleet hosts already carry a registered interface. The
+existing backend record's `is_support_awg_third` flag is **not** touched by
+the installer, and it must already be set **before the API restarts** —
+otherwise the upgraded API silently starts handing out AWG3 configs on a
+record every pre-12.3.0 client still expects to work. The installer detects
+this case and refuses to proceed without an explicit acknowledgement: type
+`AWG3-COLOCATED-ACK` at the prompt it shows, or export
+`AWG3_COLOCATED_ACK=1` for a headless run, once the backend record is
+confirmed updated. A fresh host with no existing interface is not affected —
+it always creates a new record and is never asked for this.
+
 ## AWG2 configuration
 
 The installer asks for the AmneziaWG parameters and writes the same values to
