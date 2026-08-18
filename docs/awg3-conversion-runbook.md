@@ -98,8 +98,10 @@ the two sides of this decision agree.
 ## Pause the crons
 
 **Do this on the backend box, before the sidecar install, on every node and on
-both paths.** Two scheduled commands will otherwise act on this node's rows
-while the conversion is half-done, and both do real damage.
+both paths.** Three scheduled commands will otherwise act on this node's rows
+while the conversion is half-done. The first two do real, silent damage; the
+third fails safe, but can still take a row out of service mid-conversion, so
+pause it too.
 
 `configs:cleanup-stale` runs **every ten minutes**. It skips *inactive* and
 soft-deleted servers only — so on Path A, where the old row stays active for the
@@ -120,7 +122,21 @@ The config-based veto only holds a disable back when at least 20 of the row's
 not be. If it fires while the old row is already inactive, that city is offline
 for everyone.
 
-Pause both by taking the scheduler's own overlap mutex. This needs no code
+`servers:health-check` runs **every five minutes**, against every `active`
+server. It calls the node's own API health endpoint, retrying up to 5 times
+within the run (10s timeout each); if none of the five ever comes back
+`running: true`, it sets `status='inactive'` and sends a Telegram alert. On
+Path A the old row is `active` for the whole sidecar→cutover wait, so it's in
+scope — and the sidecar restarts `wireguard.service` during install, settling
+for 60s afterward specifically because, in its own words, "a bad
+WG_PARAMS_FILE restart-loops the API." If that happens, this check can flip
+the still-serving row to inactive mid-install. **Unlike the other two, this
+one fails safe**: it only disables a row when the node API genuinely stops
+answering, it tells you immediately via Telegram, and undoing it is the same
+one-line reactivate as B7 — no stray configs written, no city silently taken
+offline by a miscalibrated heuristic.
+
+Pause all three by taking the scheduler's own overlap mutex. This needs no code
 change and no crontab edit: `schedule:run` skips any event whose mutex is
 already held. The mutex carries a TTL, so a pause you forget about heals itself.
 **On the backend box:**
@@ -140,7 +156,8 @@ if ($e === null) {
 '
 ```
 
-Run it again with `$name = "servers:connect-check"` to pause the second one.
+Run it again with `$name = "servers:connect-check"`, then a third time with
+`$name = "servers:health-check"`, to pause the other two.
 
 `paused: true` means you now hold the mutex. `paused: false` means that command
 is running right now and already holds it — wait a few seconds and repeat, do
@@ -150,7 +167,7 @@ Confirm, without side effects:
 
 ```bash
 php artisan tinker --execute='
-foreach (["configs:cleanup-stale", "servers:connect-check"] as $name) {
+foreach (["configs:cleanup-stale", "servers:connect-check", "servers:health-check"] as $name) {
     $e = collect(app(Illuminate\Console\Scheduling\Schedule::class)->events())
         ->first(fn ($ev) => str_contains((string) $ev->command, $name));
     echo $name, " paused: ", var_export($e->mutex->exists($e), true), "\n";
@@ -158,14 +175,14 @@ foreach (["configs:cleanup-stale", "servers:connect-check"] as $name) {
 '
 ```
 
-Both must print `true`. Use `exists()` for this check and not
+All three must print `true`. Use `exists()` for this check and not
 `shouldSkipDueToOverlapping()` — the latter acquires the mutex as a side effect
 and would hold it for only the default few minutes.
 
 12 hours covers a Path A wait and a Path B drain. If the conversion runs longer,
 re-run the pause command before the TTL expires.
 
-**Both are re-enabled in "After the cutover" below. Do not skip that.**
+**All three are re-enabled in "After the cutover" below. Do not skip that.**
 
 ## Shared steps 1-3 (both paths, nobody affected)
 
@@ -284,8 +301,20 @@ Have the A6 command typed and ready before running this. **On your
 workstation**, where `$OLD_IFACE` is exported:
 
 ```bash
+# root@ nodes:
 ssh <node> 'bash -s' < awg2-port443.sh -- --iface awg3 --old-iface "$OLD_IFACE" --apply
+# ubuntu@ nodes (~10 of them — see "Naming the incumbent interface" above):
+ssh <node> 'sudo bash -s' < awg2-port443.sh -- --iface awg3 --old-iface "$OLD_IFACE" --apply
 ```
+
+Unlike the sidecar and preflight scripts, `awg2-port443.sh` has no
+passwordless-sudo fallback of its own — it just checks `id -u` and exits with
+`FAIL: must run as root` if that's not 0. Run as `ubuntu@` without `sudo`, it
+dies before touching anything, right after you've confirmed the zero-live-peer
+window you've been waiting for. Use whichever line matches how you connected
+above; don't add `sudo` on a `root@` node just to be safe — root shells on
+this fleet are not guaranteed to have `sudo` installed, and that would trade a
+known-working invocation for an unverified one.
 
 The script now refuses on its own if the incumbent still has a live peer, and
 refuses if it cannot read that interface's peer table at all — a wrong
@@ -372,8 +401,15 @@ you rewrite them.
 Take 443 **with** the redirect, **on your workstation**:
 
 ```bash
+# root@ nodes:
 ssh <node> 'bash -s' < awg2-port443.sh -- --iface awg3 --old-iface "$OLD_IFACE" --grace-redirect --apply
+# ubuntu@ nodes (~10 of them — see "Naming the incumbent interface" above):
+ssh <node> 'sudo bash -s' < awg2-port443.sh -- --iface awg3 --old-iface "$OLD_IFACE" --grace-redirect --apply
 ```
+
+Same root requirement as A5: `awg2-port443.sh` has no sudo fallback of its
+own, so on an `ubuntu@` node the plain form dies with `FAIL: must run as
+root` before it takes 443. Use the line matching how you connected.
 
 Then, **on the backend box**, rewrite just the `Endpoint` line on that row's
 configs — the peer keys are unchanged, so the pool does **not** need
@@ -449,12 +485,12 @@ echo "reactivated\n";
 
 ## Both paths: after the cutover
 
-**Re-enable the two crons.** Nothing below is safe to leave paused, and the
+**Re-enable all three crons.** Nothing below is safe to leave paused, and the
 conversion is not finished until this is done:
 
 ```bash
 php artisan tinker --execute='
-foreach (["configs:cleanup-stale", "servers:connect-check"] as $name) {
+foreach (["configs:cleanup-stale", "servers:connect-check", "servers:health-check"] as $name) {
     $e = collect(app(Illuminate\Console\Scheduling\Schedule::class)->events())
         ->first(fn ($ev) => str_contains((string) $ev->command, $name));
     $e->mutex->forget($e);
@@ -463,10 +499,11 @@ foreach (["configs:cleanup-stale", "servers:connect-check"] as $name) {
 '
 ```
 
-Both must print `still paused: false`.
+All three must print `still paused: false`.
 
-`configs:cleanup-stale` is safe again the moment the old row is `inactive` — it
-skips non-active servers by design. That is why the pause only has to cover the
+`configs:cleanup-stale` and `servers:health-check` are both safe again the
+moment the old row is `inactive` — they only act on `active` servers by
+design. That is why the pause only has to cover the
 sidecar→cutover window.
 
 **Never run "Sync Server", "Add Users" or "Delete All Users" on the retired
@@ -483,8 +520,15 @@ Soft-delete the retired row once its interface is gone.
 Before AWG3 takes 443 — free on both paths, from your workstation:
 
 ```bash
+# root@ nodes:
 ssh <node> "systemctl stop awg-quick@$NEW_IFACE; awg-quick up $OLD_IFACE"
+# ubuntu@ nodes (~10 of them — see "Naming the incumbent interface" above):
+ssh <node> "sudo systemctl stop awg-quick@$NEW_IFACE; sudo awg-quick up $OLD_IFACE"
 ```
+
+Neither `systemctl` nor `awg-quick` self-elevates, so on an `ubuntu@` node the
+plain form fails on a permission error instead of rolling anything back. Use
+the line matching how you connected.
 
 `awg2-port443.sh` rolls itself back automatically on a failed check, restoring
 the config, params and API env and re-enabling the old interface.
