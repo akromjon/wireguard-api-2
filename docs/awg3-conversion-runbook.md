@@ -26,11 +26,16 @@ strands every macOS user with a 404 and no Fastest fallback.
 
 `latest-handshakes` is cumulative — it never returns to zero, so it is the wrong
 gate. A peer is live if it handshook within the last 3 minutes (WireGuard rekeys
-every ~2):
+every ~2). **Run this command with sudo and verify it succeeds; a silent `0` may
+mean permission denied, not actually zero peers:**
 
 ```bash
-awg show awg1 dump | awk 'NR>1 && $5>0 && (systime()-$5)<180' | wc -l
+sudo awg show awg1 dump | awk -v n="$(date +%s)" 'NR>1 && $5>0 && n-$5<180 {c++} END{print c+0}' || echo "ERROR: cannot read interface"
 ```
+
+If you see "Operation not permitted" or "ERROR: cannot read interface", ensure
+you have passwordless sudo configured or are running as root. A `0` without
+confirming this ran successfully should be distrusted.
 
 ## Shared steps 1-3 (both paths, nobody affected)
 
@@ -68,14 +73,20 @@ cutover. Any failed check — stop, restore from the printed backup path.
 
 If the node has multiple existing WireGuard interfaces and the script refuses
 with a message about `--incumbent`, re-run specifying which interface to keep
-alongside AWG3: `ssh <node> 'bash /tmp/awg3-sidecar.sh --incumbent awg1 --apply'`.
+alongside AWG3:
+
+```bash
+ssh <node> 'bash /tmp/awg3-sidecar.sh --incumbent awg1'          # dry run
+ssh <node> 'bash /tmp/awg3-sidecar.sh --incumbent awg1 --apply'
+```
+
 This is expected when a node has been converted before or serves multiple
 profiles.
 
 Then connect a real client to `:8443` and confirm:
 
 ```bash
-ssh <node> "awg show awg3 latest-handshakes | awk '\$2>0' | wc -l"
+ssh <node> "sudo awg show awg3 latest-handshakes | awk '\$2>0' | wc -l"
 ```
 
 Must be non-zero. An off-box UDP probe is **not** proof: `tcpdump` captures at
@@ -87,7 +98,14 @@ them.
 ### A4. Wait for a natural zero
 
 Poll until the incumbent reports **0** live peers. Nothing is retired, so this
-is simply a quiet moment on a lightly-loaded node.
+is simply a quiet moment on a lightly-loaded node. Use the live-peer gate command
+from above:
+
+```bash
+sudo awg show awg1 dump | awk -v n="$(date +%s)" 'NR>1 && $5>0 && n-$5<180 {c++} END{print c+0}' || echo "ERROR: cannot read interface"
+```
+
+Repeat until you see `0` and the command succeeds without error.
 
 ### A5. Take 443
 
@@ -132,9 +150,18 @@ had 588 past successes on :443 and 9 on :8081, same node and IP. Keep it short.
 
 Live users keep their AWG2 configs until they reconnect; every reconnect
 resolves the location group to the AWG3 clone and releases the old config back
-to the pool. Poll live peers on the incumbent until they read **0**.
+to the pool. Poll live peers on the incumbent until they read **0**. Use the
+live-peer gate command:
+
+```bash
+sudo awg show awg1 dump | awk -v n="$(date +%s)" 'NR>1 && $5>0 && n-$5<180 {c++} END{print c+0}' || echo "ERROR: cannot read interface"
+```
+
+Repeat until you see `0` and the command succeeds without error.
 
 ### B6. Take 443, then fix the stored endpoints
+
+First, take port 443 on the node:
 
 ```bash
 ssh <node> 'bash -s' < awg2-port443.sh -- --iface awg3 --old-iface awg1 --apply
@@ -143,6 +170,36 @@ ssh <node> 'bash -s' < awg2-port443.sh -- --iface awg3 --old-iface awg1 --apply
 The AWG3 pool was seeded while the node was on `:8443`, so its stored configs
 still say `:8443`. Rewrite just the `Endpoint` line on that row's configs — the
 peer keys are unchanged, so the pool does **not** need regenerating.
+
+Dry-run count:
+
+```bash
+php artisan tinker --execute='
+$s = App\Models\Server::find(<clone-id>);
+$n = 0;
+foreach ($s->configs()->cursor() as $c) {
+    if (preg_match("/^Endpoint\s*=\s*\S+:8443\s*$/m", $c->config)) { $n++; }
+}
+echo "will rewrite {$n} of {$s->configs()->count()} configs from :8443 to :443\n";
+'
+```
+
+Then apply the rewrite:
+
+```bash
+php artisan tinker --execute='
+$s = App\Models\Server::find(<clone-id>);
+$n = 0;
+foreach ($s->configs()->cursor() as $c) {
+    $new = preg_replace("/^(Endpoint\s*=\s*\S+):8443(\s*)$/m", "$1:443$2", $c->config, -1, $count);
+    if ($count > 0) {
+        $c->update(["config" => $new]);
+        $n += $count;
+    }
+}
+echo "rewrote {$n} config(s) from :8443 to :443\n";
+'
+```
 
 ## Both paths: after the cutover
 
