@@ -26,16 +26,19 @@ strands every macOS user with a 404 and no Fastest fallback.
 
 `latest-handshakes` is cumulative — it never returns to zero, so it is the wrong
 gate. A peer is live if it handshook within the last 3 minutes (WireGuard rekeys
-every ~2). **Run this command with sudo and verify it succeeds; a silent `0` may
-mean permission denied, not actually zero peers:**
+every ~2):
 
 ```bash
-sudo awg show awg1 dump | awk -v n="$(date +%s)" 'NR>1 && $5>0 && n-$5<180 {c++} END{print c+0}' || echo "ERROR: cannot read interface"
+if ! dump=$(sudo awg show awg1 dump 2>&1); then
+    printf 'GATE FAILED — could not read awg1: %s\nDo NOT take 443.\n' "$dump"
+else
+    printf '%s\n' "$dump" | awk -v n="$(date +%s)" 'NR>1 && $5>0 && n-$5<180 {c++} END {print "live peers: " c+0}'
+fi
 ```
 
-If you see "Operation not permitted" or "ERROR: cannot read interface", ensure
-you have passwordless sudo configured or are running as root. A `0` without
-confirming this ran successfully should be distrusted.
+If this prints `GATE FAILED`, do not proceed — investigate the error. A bare `0`
+with no error prefix means zero live peers confirmed; any other output means the
+command succeeded but peers are still connected.
 
 ## Shared steps 1-3 (both paths, nobody affected)
 
@@ -86,12 +89,17 @@ profiles.
 Then connect a real client to `:8443` and confirm:
 
 ```bash
-ssh <node> "sudo awg show awg3 latest-handshakes | awk '\$2>0' | wc -l"
+ssh <node> 'if ! sudo awg show awg3 latest-handshakes 2>&1 | grep -q "^"; then
+    printf "GATE FAILED — could not read awg3\n" >&2
+    exit 1
+else
+    sudo awg show awg3 latest-handshakes | grep -c "^"
+fi'
 ```
 
-Must be non-zero. An off-box UDP probe is **not** proof: `tcpdump` captures at
-the device layer, so probe packets appear even when the listener never receives
-them.
+Must print a non-zero count. An off-box UDP probe is **not** proof: `tcpdump`
+captures at the device layer, so probe packets appear even when the listener
+never receives them.
 
 ## Path A (premium) — take 443, then cut over
 
@@ -102,10 +110,14 @@ is simply a quiet moment on a lightly-loaded node. Use the live-peer gate comman
 from above:
 
 ```bash
-sudo awg show awg1 dump | awk -v n="$(date +%s)" 'NR>1 && $5>0 && n-$5<180 {c++} END{print c+0}' || echo "ERROR: cannot read interface"
+if ! dump=$(sudo awg show awg1 dump 2>&1); then
+    printf 'GATE FAILED — could not read awg1: %s\nDo NOT take 443.\n' "$dump"
+else
+    printf '%s\n' "$dump" | awk -v n="$(date +%s)" 'NR>1 && $5>0 && n-$5<180 {c++} END {print "live peers: " c+0}'
+fi
 ```
 
-Repeat until you see `0` and the command succeeds without error.
+Repeat until you see "live peers: 0" with no error prefix.
 
 ### A5. Take 443
 
@@ -154,10 +166,14 @@ to the pool. Poll live peers on the incumbent until they read **0**. Use the
 live-peer gate command:
 
 ```bash
-sudo awg show awg1 dump | awk -v n="$(date +%s)" 'NR>1 && $5>0 && n-$5<180 {c++} END{print c+0}' || echo "ERROR: cannot read interface"
+if ! dump=$(sudo awg show awg1 dump 2>&1); then
+    printf 'GATE FAILED — could not read awg1: %s\nDo NOT take 443.\n' "$dump"
+else
+    printf '%s\n' "$dump" | awk -v n="$(date +%s)" 'NR>1 && $5>0 && n-$5<180 {c++} END {print "live peers: " c+0}'
+fi
 ```
 
-Repeat until you see `0` and the command succeeds without error.
+Repeat until you see "live peers: 0" with no error prefix.
 
 ### B6. Take 443, then fix the stored endpoints
 
