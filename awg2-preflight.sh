@@ -9,8 +9,23 @@
 #   ssh <node> 'bash -s' < awg2-preflight.sh -- --port 8081 --iface awg1
 set -uo pipefail
 
+# Does a loaded amneziawg module version string satisfy AWG3? Mirrors
+# awg3_module_version_ok in amneziawg-install.sh: only the leading major
+# matters, and an unreadable or empty version is never a pass.
+awg_preflight_module_is_awg3() {
+	local version=$1
+	[[ ${version} =~ ^([0-9]+) ]] || return 1
+	((BASH_REMATCH[1] >= 3))
+}
+
+# Let the test suite source the pure helpers without probing the host.
+if [[ ${AWG_PREFLIGHT_LIB_ONLY:-0} == "1" ]]; then
+	return 0 2>/dev/null || exit 0
+fi
+
 NEW_PORT=8081
 NEW_IFACE=awg1
+AWG3_MODE=0
 while [[ $# -gt 0 ]]; do
 	case "$1" in
 	--port)
@@ -20,6 +35,10 @@ while [[ $# -gt 0 ]]; do
 	--iface)
 		NEW_IFACE=$2
 		shift 2
+		;;
+	--awg3)
+		AWG3_MODE=1
+		shift
 		;;
 	--) shift ;;
 	*)
@@ -175,7 +194,22 @@ fi
 
 # --- 8. Kernel module -----------------------------------------------------
 MOD_LOADED=$(cat /sys/module/amneziawg/version 2>/dev/null || echo none)
-echo "  INFO  loaded amneziawg module: ${MOD_LOADED} (must read 3.0.20260805 AFTER install)"
+if ((AWG3_MODE == 1)); then
+	# assert_awg3_supported in the installer treats a READABLE version below 3
+	# as a hard failure, on purpose: after apt upgrades the tools on a running
+	# 2.x module the file still reports 2.x until reboot, and passing the gate
+	# in that state would install AWG3 config against a module that cannot
+	# serve it. Catch it here, where the remedy can be spelled out.
+	if [[ ${MOD_LOADED} == none ]]; then
+		echo "  INFO  amneziawg module not loaded; the installer will probe the tools instead"
+	elif awg_preflight_module_is_awg3 "${MOD_LOADED}"; then
+		echo "  OK    loaded amneziawg module: ${MOD_LOADED}"
+	else
+		fail "loaded amneziawg module is ${MOD_LOADED}; AWG3 needs 3.x. Upgrade the packages and REBOOT this node before converting it — the reboot drops its live users, so schedule it."
+	fi
+else
+	echo "  INFO  loaded amneziawg module: ${MOD_LOADED} (must read 3.0.20260805 AFTER install)"
+fi
 
 echo
 echo "----------------------------------------------------------------------"
