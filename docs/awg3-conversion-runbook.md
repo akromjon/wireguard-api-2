@@ -205,8 +205,31 @@ All three must print `true`. Use `exists()` for this check and not
 `shouldSkipDueToOverlapping()` — the latter acquires the mutex as a side effect
 and would hold it for only the default few minutes.
 
-12 hours covers a Path A wait and a Path B drain. If the conversion runs longer,
-re-run the pause command before the TTL expires.
+12 hours covers a long conversion. If it runs longer, **you cannot extend the
+pause by re-running the pause command** — `create()` is put-if-absent, so while
+you already hold the lock it returns `paused: false` and changes nothing, which
+reads exactly like "someone else holds it" and leaves you believing you extended
+a pause that then silently expires. Observed 2026-08-18.
+
+To actually extend it, release and retake in one go:
+
+```bash
+php artisan tinker --execute='
+$hours = 12;
+foreach (["configs:cleanup-stale", "servers:connect-check", "servers:health-check"] as $name) {
+    $e = collect(app(Illuminate\Console\Scheduling\Schedule::class)->events())
+        ->first(fn ($ev) => str_contains((string) $ev->command, $name));
+    $e->mutex->forget($e);
+    $e->expiresAt = $hours * 60;
+    echo $name, " re-armed: ", var_export($e->mutex->create($e), true), "\n";
+}
+'
+```
+
+All three must print `re-armed: true`. There is a sub-second gap between the
+forget and the create where the scheduler could start one of these commands, so
+re-arm at a moment when you are not mid-cutover, and confirm with the
+`exists()` check below afterwards.
 
 **All three are re-enabled in "After the cutover" below. Do not skip that.**
 
