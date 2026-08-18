@@ -5,17 +5,43 @@ One node at a time. Never batch.
 **No user may be disconnected, and no user may be left unable to connect.**
 Everything below exists to hold that line.
 
-There are two paths. Pick by whether the node can reach zero live peers:
+**Strategy, decided 2026-08-18: coexistence. The incumbent interface keeps UDP
+443 and keeps its users, indefinitely.** AWG3 is installed beside it on UDP
+8443, and the database row is cut over so that *new* allocations go to AWG3.
+Nobody is ever disconnected. The old interface simply empties as its users
+drift off over days.
 
-- **Path A — premium nodes.** Nearly idle, so they hit zero live peers on their
-  own. AWG3 takes 443 *before* the row is cut over, so allocations never point
-  at a non-443 port. Use this for every premium node.
-- **Path B — free nodes 313, 314, 321.** ~370 users each; they never reach zero
-  while their row is serving, so the row must be retired first. That opens a
-  real `:8443` window. Use this only for the three free nodes, and only at the
-  free tier's traffic trough.
+This replaces the earlier "wait for zero live peers, then take 443" plan, which
+does not survive contact with real users: a tunnel that stays up re-handshakes
+every ~2 minutes forever, so a node with even one always-on user never reaches
+zero. Measured on 325 Bucharest, 2026-08-18 — it sat at 2 live peers
+indefinitely and had to be forced.
+
+**Known cost of this choice.** Measured 2026-08-09: users who could not connect
+had 588 past successes on :443 and 9 on :8081 — same node, same IP, only the
+port differing. Some networks pass UDP 443 and drop everything else. So the
+users who most need AWG3's blocking resistance are the ones least able to reach
+it on 8443. This was raised and the port was confirmed as 8443 anyway. Watch the
+converted rows' connect rate; if it craters, that is this, not a broken install.
+
+Taking 443 is deliberately **out of scope** for a routine conversion. It is
+written up at the end under "Later: taking 443", for when a node has genuinely
+drained or when someone decides to force it.
 
 ## Before you touch anything
+
+**Check the cutover command exists on the backend box.** It is a Laravel command
+and it only reaches prod through a deploy. On 2026-08-18 the pilot got as far as
+taking the port before discovering the command was not deployed, leaving Bucharest
+handing out configs for a downed interface for 2-3 minutes. Verify first, not at
+step 4:
+
+```bash
+ssh root@46.224.140.182 "cd /var/www/api.vipn.io && php artisan list | grep awg3-cutover"
+```
+
+One line back means you are good. Nothing back means deploy it before touching
+any node — see the backend-deployment skill.
 
 Confirm the node is not on the macOS floor. **298 Stockholm and 304 Milan stay
 AWG2 permanently** — they are the only servers a macOS client can be offered,
@@ -184,7 +210,7 @@ re-run the pause command before the TTL expires.
 
 **All three are re-enabled in "After the cutover" below. Do not skip that.**
 
-## Shared steps 1-3 (both paths, nobody affected)
+## Steps 1-3 on the node (nobody affected)
 
 ### 1. Preflight (read-only, changes nothing)
 
@@ -286,204 +312,53 @@ the fix is still to delete the stray peer, delete the half-built clone row, and
 re-run — the command refuses to build a second clone for the same node, on
 purpose.
 
-## Path A (premium) — take 443, then cut over
+## 4. Cut over the row (backend box)
 
-### A4. Wait for a natural zero
-
-Poll until the incumbent reports **0** live peers. Nothing is retired, so this
-is simply a quiet moment on a lightly-loaded node. Use the live-peer gate
-command from "Counting live peers" above, in the shell where `$OLD_IFACE` is
-set. Repeat until you see `live peers: 0` with no error prefix.
-
-### A5. Take 443
-
-Have the A6 command typed and ready before running this. **On your
-workstation**, where `$OLD_IFACE` is exported:
+This is the whole conversion. After it, new allocations go to AWG3 on 8443;
+everyone already connected stays on the incumbent interface on 443 until they
+reconnect of their own accord.
 
 ```bash
-# root@ nodes:
-ssh <node> 'bash -s' < awg2-port443.sh -- --iface awg3 --old-iface "$OLD_IFACE" --apply
-# ubuntu@ nodes (~10 of them — see "Naming the incumbent interface" above):
-ssh <node> 'sudo bash -s' < awg2-port443.sh -- --iface awg3 --old-iface "$OLD_IFACE" --apply
-```
-
-Unlike the sidecar and preflight scripts, `awg2-port443.sh` has no
-passwordless-sudo fallback of its own — it just checks `id -u` and exits with
-`FAIL: must run as root` if that's not 0. Run as `ubuntu@` without `sudo`, it
-dies before touching anything, right after you've confirmed the zero-live-peer
-window you've been waiting for. Use whichever line matches how you connected
-above; don't add `sudo` on a `root@` node just to be safe — root shells on
-this fleet are not guaranteed to have `sudo` installed, and that would trade a
-known-working invocation for an unverified one.
-
-The script now refuses on its own if the incumbent still has a live peer, and
-refuses if it cannot read that interface's peer table at all — a wrong
-`--old-iface` no longer passes silently. `--force` overrides it and drops those
-users; on Path A you should never need it.
-
-It rewrites `SERVER_PORT` in the params file and `AWG_PORT` in the API env, so
-every config issued from now carries `:443`. It rolls itself back on any failed
-check.
-
-### A6. Cut over the row — immediately
-
-**On the backend box:**
-
-```bash
-php artisan servers:awg3-cutover --server-id=<id> --configs=<N> --apply
-```
-
-Run this straight after A5. Between the two, the active row is the AWG2 one
-while its interface is already down, so a user allocated in that gap gets a
-config for a dead interface. Seconds, one city — but do not leave it open.
-
-The command probes the node and **refuses if the configs it issues are not on
-:443**, which is what catches an A5 that was skipped or that silently failed.
-Do not reach for `--allow-non-443` here; on Path A that refusal is telling you
-the port move did not happen. Go and fix A5.
-
-The clone is created `inactive`, seeded, checked against `--configs`, and only
-then flipped to `active` in the same transaction that retires the old row. So
-there is no moment where both rows serve, and no moment where an empty clone
-sorts to the front of the location group.
-
-If `--configs` disagrees with the legacy pool size the command prints both
-numbers and stops. They are two different measurements — a node peer count from
-when the sidecar ran, and a database row count from now — so a small difference
-can be fine. When you have decided it is, re-run with `--accept-mismatch`. It
-takes no TTY, so it works over a plain `ssh … 'php artisan …'`.
-
-The pool is seeded while the node is already on 443, so its configs are correct
-with no Endpoint rewrite needed.
-
-## Path B (free) — cut over, drain, then take 443
-
-### B4. Cut over at the traffic trough (backend box)
-
-Confirm `servers:connect-check` is still paused before you start (the check
-command in "Pause the crons"). From here until B6 the clone is deliberately
-serving on a port some networks drop, and an unpaused connect-check will disable
-it while the old row is already inactive — taking the whole city offline.
-
-```bash
-php artisan servers:awg3-cutover --server-id=<id> --configs=<N> --allow-non-443            # dry run
+php artisan servers:awg3-cutover --server-id=<id> --configs=<N> --allow-non-443
 php artisan servers:awg3-cutover --server-id=<id> --configs=<N> --allow-non-443 --apply
 ```
 
-`--allow-non-443` is required here and only here: it is how Path B says "yes, I
-know this pool is being seeded on :8443, that is the plan". Without it the
-command refuses, which is what protects Path A.
+`<N>` is the `awg2_peers=` number the sidecar printed. Run the first form,
+read the plan, then the second.
 
-From here new allocations go to AWG3 on `:8443`. **This is the one window in the
-rollout where users are affected:** networks that pass only UDP 443 cannot
-connect to this city until B6. Measured 2026-08-09 — users who could not connect
-had 588 past successes on :443 and 9 on :8081, same node and IP. Keep it short.
+**`--allow-non-443` is required here and that is a deliberate weakening.** The
+flag exists to stop a node being cut over while its AWG3 interface is still on
+a temporary port. Under the coexistence strategy every cutover is on 8443, so
+the flag is passed every time and the guard no longer protects anything. It
+stays only so that the command still refuses when nobody meant to be off 443.
 
-### B5. Drain
+The command creates the clone `inactive`, seeds its pool, verifies parity, then
+flips clone→`active` and old→`inactive` in one transaction. It refuses to build
+a second clone for a node that already has one, so a failed run is safe to
+retry after you delete the half-built clone.
 
-Live users keep their AWG2 configs until they reconnect; every reconnect
-resolves the location group to the AWG3 clone and releases the old config back
-to the pool. Poll live peers on the incumbent, using the live-peer gate command
-from "Counting live peers", until it reads `live peers: 0` with no error prefix.
-
-This takes hours. If it runs past the 12-hour cron pause, re-run the pause
-command before the TTL expires.
-
-### B6. Take 443, with a grace redirect, then fix the stored endpoints
-
-The clone's stored configs all say `:8443`. The moment the port moves, nothing
-is listening there — so between the move and the endpoint rewrite, every user
-holding one of those configs cannot connect. `awg2-port443.sh` has
-`--grace-redirect` for exactly this gap: it NAT-forwards the old port to 443 on
-the *same* interface with the *same* keys, so stale configs keep working while
-you rewrite them.
-
-Take 443 **with** the redirect, **on your workstation**:
-
-```bash
-# root@ nodes:
-ssh <node> 'bash -s' < awg2-port443.sh -- --iface awg3 --old-iface "$OLD_IFACE" --grace-redirect --apply
-# ubuntu@ nodes (~10 of them — see "Naming the incumbent interface" above):
-ssh <node> 'sudo bash -s' < awg2-port443.sh -- --iface awg3 --old-iface "$OLD_IFACE" --grace-redirect --apply
-```
-
-Same root requirement as A5: `awg2-port443.sh` has no sudo fallback of its
-own, so on an `ubuntu@` node the plain form dies with `FAIL: must run as
-root` before it takes 443. Use the line matching how you connected.
-
-Then, **on the backend box**, rewrite just the `Endpoint` line on that row's
-configs — the peer keys are unchanged, so the pool does **not** need
-regenerating.
-
-Dry-run count:
+## 5. Verify, and watch the connect rate (backend box)
 
 ```bash
 php artisan tinker --execute='
-$s = App\Models\Server::find(<clone-id>);
-$n = 0;
-foreach ($s->configs()->cursor() as $c) {
-    if (preg_match("/^Endpoint\s*=\s*\S+:8443\s*$/m", $c->config)) { $n++; }
-}
-echo "will rewrite {$n} of {$s->configs()->count()} configs from :8443 to :443\n";
+foreach (DB::select("SELECT id,status,is_support_awg_third,max_connections,current_connections FROM servers WHERE ip = ? AND deleted_at IS NULL ORDER BY id", ["<node-ip>"]) as $r) { echo json_encode($r), PHP_EOL; }
 '
 ```
 
-Then apply the rewrite:
+Expect two rows: the new clone `active` with `is_support_awg_third = 1`, and the
+old row `inactive` with the flag still `0`. Capacity must not have shrunk.
+
+Then watch the clone over the next hours. `servers:connect-check` runs every
+minute and disables rows it judges unreachable — and on 8443 a converted row may
+genuinely score badly through no fault of the install. If the clone goes
+`inactive`, that is the port choice showing up, not a broken node. Re-activate it
+and reconsider the port before converting more:
 
 ```bash
-php artisan tinker --execute='
-$s = App\Models\Server::find(<clone-id>);
-$n = 0;
-foreach ($s->configs()->cursor() as $c) {
-    $new = preg_replace("/^(Endpoint\s*=\s*\S+):8443(\s*)$/m", "$1:443$2", $c->config, -1, $count);
-    if ($count > 0) {
-        $c->update(["config" => $new]);
-        $n += $count;
-    }
-}
-echo "rewrote {$n} config(s) from :8443 to :443\n";
-'
+php artisan tinker --execute='App\Models\Server::find(<clone-id>)->update(["status" => "active"]); Cache::forget("servers:connect-check:strikes");'
 ```
 
-Finally remove the redirect, once the rewrite is done and traffic on the old
-port has stopped. On the node:
-
-```bash
-sudo iptables -t nat -L PREROUTING -n --line-numbers | grep 8443     # confirm it is there
-sudo iptables -t nat -D PREROUTING -p udp --dport 8443 -j REDIRECT --to-port 443
-sudo iptables -D INPUT -p udp --dport 8443 -j ACCEPT
-sudo iptables -t nat -L PREROUTING -n | grep 8443 || echo "redirect removed"
-```
-
-Leaving it in place is not dangerous — it points at the same interface and the
-same keys — but it keeps a second door open on a node whose whole purpose is to
-be hard to fingerprint. Remove it.
-
-### B7. Check the clone is still active (backend box)
-
-The `:8443` window scores badly, so verify `servers:connect-check` did not
-disable the clone despite the pause:
-
-```bash
-php artisan tinker --execute='
-$s = App\Models\Server::find(<clone-id>);
-echo $s->id, " ", $s->ip, " status=", $s->status, " awg3=", (int) $s->is_support_awg_third, "\n";
-'
-```
-
-`status=active` is the only acceptable answer. If it reads `inactive`, the city
-is offline right now — re-activate it and clear the strike counter so it is not
-disabled again on the next run:
-
-```bash
-php artisan tinker --execute='
-App\Models\Server::find(<clone-id>)->update(["status" => "active"]);
-Illuminate\Support\Facades\Cache::forget("servers:connect-check:strikes");
-echo "reactivated\n";
-'
-```
-
-## Both paths: after the cutover
+## After the cutover
 
 **Re-enable all three crons.** Nothing below is safe to leave paused, and the
 conversion is not finished until this is done:
@@ -503,8 +378,10 @@ All three must print `still paused: false`.
 
 `configs:cleanup-stale` and `servers:health-check` are both safe again the
 moment the old row is `inactive` — they only act on `active` servers by
-design. That is why the pause only has to cover the
-sidecar→cutover window.
+design. That is why the pause only has to cover the sidecar→cutover window.
+
+Leave `servers:connect-check` running, but see step 5 — it is the one most
+likely to act on a freshly converted 8443 row.
 
 **Never run "Sync Server", "Add Users" or "Delete All Users" on the retired
 row.** The node API serves AWG3, so any of them would write AWG3 configs into
@@ -513,11 +390,13 @@ three Filament actions are now disabled on any row that is not `active`, and
 hovering one tells you why — but the retired row goes inactive at cutover, so
 do not go re-activating it to "have a look".
 
-Soft-delete the retired row once its interface is gone.
+Do NOT soft-delete the retired row. Under the coexistence strategy its
+interface keeps running on 443 and its config rows are what live users are
+still holding. It is retired, not finished.
 
 ## Rollback
 
-Before AWG3 takes 443 — free on both paths, from your workstation:
+Before the cutover — free, from your workstation:
 
 ```bash
 # root@ nodes:
@@ -530,9 +409,6 @@ Neither `systemctl` nor `awg-quick` self-elevates, so on an `ubuntu@` node the
 plain form fails on a permission error instead of rolling anything back. Use
 the line matching how you connected.
 
-`awg2-port443.sh` rolls itself back automatically on a failed check, restoring
-the config, params and API env and re-enabling the old interface.
-
 After the row cutover, reverse the flip, on the backend box:
 
 ```bash
@@ -543,5 +419,23 @@ The old row never had `is_support_awg_third` set, so there is nothing to un-set
 — it becomes visible to every client again the moment it is active.
 
 Live users were never moved, so there is nothing to undo on the node itself.
-Once the old interface is torn down and its configs are gone, that node is
-committed.
+
+## Later: taking 443
+
+Not part of a routine conversion. The incumbent will not empty on its own while
+anyone leaves the VPN switched on, so this only happens when a node has genuinely
+drained or when someone decides to force it and accept the drop.
+
+```bash
+# on the node — count LIVE peers first, see "Counting live peers"
+ssh <node> 'bash -s' < awg2-port443.sh -- --iface awg3 --old-iface "$OLD_IFACE" --apply
+```
+
+It refuses while any peer handshook within 180s. `--force` overrides and drops
+them deliberately. Measured on 325 Bucharest 2026-08-18: 2 forced-off users both
+reconnected by themselves within 95 seconds, onto AWG3.
+
+Afterwards the stored AWG3 configs still say `:8443` and must have their
+`Endpoint` rewritten to `:443` — the peer keys are unchanged, so the pool does
+NOT need regenerating. Use `--grace-redirect` to cover the gap between the port
+move and the rewrite.
