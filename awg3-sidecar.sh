@@ -122,9 +122,16 @@ Plan for $(hostname):
   api       reused on TCP ${API_PORT_EXISTING}, repointed to ${NEW_IFACE}
   after     backend cutover with --configs=${PEERS_BEFORE}
 
-WARNING: the shared node API is repointed to AWG3 by this install. The backend
-row for this node must already have is_support_awg_third set, or it will hand
-AWG3 configs to clients that cannot use them.
+WARNING: the shared node API is repointed to AWG3 by this install, while the
+backend row for this node stays AWG2 until the cutover. Do NOT flag the row
+is_support_awg_third now — that would hide the city from every old-iOS and
+macOS client for the whole (unbounded) wait for a zero-live-peer moment.
+
+Instead, nothing may write to this node from the old row while that gap is
+open. Before running --apply: pause the configs:cleanup-stale schedule (it
+recreates configs through the node API every 10 minutes), and do not use the
+Filament Sync Server / Add Users / Delete All Users actions. See the "Pause the
+crons" section of docs/awg3-conversion-runbook.md.
 
 PLAN
 
@@ -326,9 +333,28 @@ echo "firewall is invisible from here:"
 echo "  printf probe | nc -u -w1 ${PUB_IP} ${NEW_PORT}"
 echo "  (watch here with: tcpdump -ni any 'udp port ${NEW_PORT}' -c 3)"
 echo
-echo "A UDP probe is NOT proof. The only end-to-end proof is a rising handshake"
-echo "count after a real client connects:"
-echo "  awg show ${NEW_IFACE} latest-handshakes | awk '\$2>0' | wc -l"
+cat <<PROOF_BLOCK
+A UDP probe is NOT proof. The only end-to-end proof is a peer with a completed
+handshake after a real client connects.
+
+Read the command's OWN exit status. A bare \`awg show ... | wc -l\` prints 0 on a
+permission error — and on the ubuntu@ nodes it always will — which looks exactly
+like "nobody connected" and would send you rolling back a healthy install:
+
+  if ! dump=\$(sudo awg show ${NEW_IFACE} dump 2>&1); then
+      printf 'GATE FAILED — could not read ${NEW_IFACE}: %s\\n' "\$dump"
+  else
+      printf '%s\\n' "\$dump" | awk 'NR>1 && \$5>0 {c++} END {print "peers with a completed handshake: " c+0}'
+  fi
+
+Must print "peers with a completed handshake: N" with N greater than zero. A
+GATE FAILED line means the command did not run — investigate, do not cut over.
+
+PROOF_BLOCK
+echo "Then DELETE that test peer before the cutover. It lives on the node but in no"
+echo "database row, so the cutover's pool sync claims it too, the pool comes out one"
+echo "config over the parity target, and the cutover aborts. See step 3 of"
+echo "docs/awg3-conversion-runbook.md for the exact delete call."
 echo
 echo "THEN on the backend:"
 echo "  php artisan servers:awg3-cutover --server-id=<id> --configs=${PEERS_BEFORE} --apply"

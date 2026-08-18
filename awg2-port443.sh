@@ -7,11 +7,20 @@
 # Same node, same IP, same user; only the port differs. Until awg1 is on 443
 # those users cannot connect at all.
 #
-# This DROPS whoever is still on awg0. They reconnect and land on a config that
-# works on restricted networks. Run it when awg0 has drained to a handful.
+# This DROPS whoever is still on the old interface. By default it REFUSES to run
+# while that interface has any live peer, because this is the one step in the
+# whole rollout that can drop a live tunnel. Pass --force to drop them anyway.
 #
 #   ssh <node> 'bash -s' < awg2-port443.sh            # dry run
 #   ssh <node> 'bash -s' < awg2-port443.sh -- --apply
+#
+# Flags:
+#   --iface <n>       interface to move onto 443 (default awg1)
+#   --old-iface <n>   interface currently holding 443, to retire (default awg0)
+#   --apply           actually do it
+#   --force           proceed even though the old interface still has live peers
+#   --grace-redirect  keep the old port working by NAT-redirecting it to 443,
+#                     for the gap before stored config Endpoints are rewritten
 set -uo pipefail
 
 OLD_IFACE=awg0
@@ -19,6 +28,14 @@ NEW_IFACE=awg1
 TARGET_PORT=443
 APPLY=0
 GRACE=0
+FORCE=0
+
+# A peer is live if it handshook within this window. WireGuard rekeys about
+# every 2 minutes, so 180s is one missed rekey. Must match the live-peer gate
+# in docs/awg3-conversion-runbook.md — two different windows on the two sides
+# of the same decision is how an operator ends up dropping users the runbook
+# just told them were not there.
+LIVE_WINDOW=180
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
@@ -28,6 +45,10 @@ while [[ $# -gt 0 ]]; do
 		;;
 	--grace-redirect)
 		GRACE=1
+		shift
+		;;
+	--force)
+		FORCE=1
 		shift
 		;;
 	--iface)
@@ -44,6 +65,16 @@ while [[ $# -gt 0 ]]; do
 		exit 2
 		;;
 	esac
+done
+
+# An unset shell variable in the caller turns `--old-iface "$OLD_IFACE" --apply`
+# into `--old-iface --apply`, which would otherwise be accepted as an interface
+# named "--apply" and quietly retire nothing.
+for iface_arg in "${NEW_IFACE}" "${OLD_IFACE}"; do
+	[[ ${iface_arg} =~ ^[a-zA-Z][a-zA-Z0-9_.-]*$ ]] || {
+		echo "FAIL: '${iface_arg}' is not a valid interface name — check --iface / --old-iface" >&2
+		exit 2
+	}
 done
 
 AWG_DIR=/etc/amnezia/amneziawg
@@ -84,12 +115,53 @@ fi
 }
 
 PEERS_BEFORE=$(awg show "${NEW_IFACE}" peers 2>/dev/null | wc -l | tr -d ' ')
-OLD_LIVE=$(awg show "${OLD_IFACE}" latest-handshakes 2>/dev/null |
-	awk -v n="$(date +%s)" '$2>0 && n-$2<300 {c++} END{print c+0}')
 OLD_PORT=$(awg show "${OLD_IFACE}" 2>/dev/null | awk '/listening port/ {print $3}')
 
+# Read the peer dump into a variable so the command's OWN exit status is
+# checked. Piping straight into awk hides the failure: awk exits 0 on empty
+# stdin and prints 0, which is indistinguishable from a genuinely idle
+# interface — and "0 live users" is precisely the answer that unlocks dropping
+# everyone. Wrong --old-iface, a missing interface or a permission error must
+# all be loud.
+if OLD_DUMP=$(awg show "${OLD_IFACE}" dump 2>&1); then
+	OLD_READABLE=1
+	OLD_LIVE=$(printf '%s\n' "${OLD_DUMP}" |
+		awk -v n="$(date +%s)" -v w="${LIVE_WINDOW}" 'NR>1 && $5>0 && n-$5<w {c++} END{print c+0}')
+else
+	OLD_READABLE=0
+	OLD_LIVE=0
+fi
+
 info "${NEW_IFACE}: port ${CUR_PORT}, ${PEERS_BEFORE} peers"
-info "${OLD_IFACE}: port ${OLD_PORT:-none}, ${OLD_LIVE} live users who WILL be dropped"
+if ((OLD_READABLE == 1)); then
+	info "${OLD_IFACE}: port ${OLD_PORT:-none}, ${OLD_LIVE} live users (handshake < ${LIVE_WINDOW}s) who WILL be dropped"
+elif ip -br link show "${OLD_IFACE}" >/dev/null 2>&1; then
+	echo "FAIL: ${OLD_IFACE} exists but its peer table could not be read:"
+	echo "      ${OLD_DUMP}"
+	echo "      Cannot prove it has zero live users, so cannot prove this drops nobody."
+	if ((FORCE == 0)); then
+		echo "SUMMARY ok=no refused=old_iface_unreadable"
+		exit 1
+	fi
+	echo "      --force given — proceeding blind."
+else
+	info "${OLD_IFACE}: not present, nothing to drop"
+fi
+
+# The zero-live-peer gate. Everything else in this rollout is reversible; this
+# is not — a dropped tunnel is a dropped tunnel.
+if ((OLD_LIVE > 0 && FORCE == 0)); then
+	echo
+	echo "REFUSING: ${OLD_IFACE} still has ${OLD_LIVE} live peer(s) (handshake < ${LIVE_WINDOW}s)."
+	echo "Taking UDP ${TARGET_PORT} now drops every one of them."
+	echo "Wait for the live-peer gate to read zero, or pass --force to drop them deliberately."
+	echo "SUMMARY ok=no refused=live_peers old_live=${OLD_LIVE}"
+	exit 1
+fi
+if ((OLD_LIVE > 0)); then
+	echo
+	echo "WARNING: --force given — ${OLD_LIVE} live peer(s) on ${OLD_IFACE} WILL be dropped."
+fi
 
 if [[ -n ${OLD_PORT} && ${OLD_PORT} != "${TARGET_PORT}" ]]; then
 	# Something else owns 443; refuse rather than guess.
