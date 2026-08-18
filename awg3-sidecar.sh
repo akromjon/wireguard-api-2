@@ -137,11 +137,14 @@ fi
 # --- 2. Backup ------------------------------------------------------------
 say "Backup"
 STAMP=$(date +%Y%m%d-%H%M%S)
-BACKUP=/root/awg3-backup-${STAMP}
-${S} mkdir -p "${BACKUP}" || die "failed to create backup directory ${BACKUP}"
-${S} cp -a /etc/amnezia/amneziawg "${BACKUP}/" || die "failed to backup /etc/amnezia/amneziawg to ${BACKUP}"
-${S} cp -a /etc/wireguard-api/.env "${BACKUP}/env.bak" || die "failed to backup /etc/wireguard-api/.env to ${BACKUP}"
-${S} cp -a /usr/local/bin/wireguard "${BACKUP}/wireguard.bin" 2>/dev/null || true
+BACKUP_PATH=/root/awg3-backup-${STAMP}
+${S} mkdir -p "${BACKUP_PATH}" || die "failed to create backup directory ${BACKUP_PATH} — no changes have been made to the node"
+${S} cp -a /etc/amnezia/amneziawg "${BACKUP_PATH}/" || die "failed to backup /etc/amnezia/amneziawg to ${BACKUP_PATH} — no changes have been made to the node"
+${S} cp -a /etc/wireguard-api/.env "${BACKUP_PATH}/env.bak" || die "failed to backup /etc/wireguard-api/.env to ${BACKUP_PATH} — no changes have been made to the node"
+${S} cp -a /usr/local/bin/wireguard "${BACKUP_PATH}/wireguard.bin" 2>/dev/null || true
+
+# Only promote to BACKUP after all backups complete successfully
+BACKUP="${BACKUP_PATH}"
 echo "  ${BACKUP}"
 
 # --- 3. Install -----------------------------------------------------------
