@@ -36,9 +36,12 @@ else
 fi
 ```
 
-If this prints `GATE FAILED`, do not proceed — investigate the error. A bare `0`
-with no error prefix means zero live peers confirmed; any other output means the
-command succeeded but peers are still connected.
+This prints one of two things. `GATE FAILED — could not read <iface>: ...` means
+the command did not run — do not proceed, investigate the error. `live peers: N`
+means the command ran and counted `N` live peers; `live peers: 0` is the only
+string that confirms zero. Any other output — a bare `0`, no output at all, a
+shell error not wrapped in `GATE FAILED` — means the command did not run as
+intended. Do not treat that as a zero. Stop and investigate instead.
 
 ## Shared steps 1-3 (both paths, nobody affected)
 
@@ -86,20 +89,25 @@ ssh <node> 'bash /tmp/awg3-sidecar.sh --incumbent awg1 --apply'
 This is expected when a node has been converted before or serves multiple
 profiles.
 
-Then connect a real client to `:8443` and confirm:
+Then connect a real client to `:8443` and confirm, on the node:
 
 ```bash
-ssh <node> 'if ! sudo awg show awg3 latest-handshakes 2>&1 | grep -q "^"; then
-    printf "GATE FAILED — could not read awg3\n" >&2
-    exit 1
+if ! dump=$(sudo awg show awg3 dump 2>&1); then
+    printf 'GATE FAILED — could not read awg3: %s\nDo NOT cut over.\n' "$dump"
 else
-    sudo awg show awg3 latest-handshakes | grep -c "^"
-fi'
+    printf '%s\n' "$dump" | awk 'NR>1 && $5>0 {c++} END {print "peers with a completed handshake: " c+0}'
+fi
 ```
 
-Must print a non-zero count. An off-box UDP probe is **not** proof: `tcpdump`
-captures at the device layer, so probe packets appear even when the listener
-never receives them.
+This gate asks a different question than the live-peer gate above: has *any*
+client completed a handshake on the new interface at all, ever — not whether
+one is live right now. There is no 180-second window here.
+
+Must print `peers with a completed handshake: N` with `N` greater than zero. A
+`GATE FAILED` line means the command did not run — investigate before treating
+this as proof of anything, and do not cut over. An off-box UDP probe is **not**
+proof either: `tcpdump` captures at the device layer, so probe packets appear
+even when the listener never receives them.
 
 ## Path A (premium) — take 443, then cut over
 
