@@ -23,6 +23,7 @@ NEW_IPV4=10.69.66.1
 NEW_IPV6=fd45:45:45::1
 APPLY=0
 INSTALL_TIMEOUT=900
+CUR_IFACE=""
 SRC_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
 while [[ $# -gt 0 ]]; do
@@ -47,6 +48,10 @@ while [[ $# -gt 0 ]]; do
 		NEW_IPV6=$2
 		shift 2
 		;;
+	--incumbent)
+		CUR_IFACE=$2
+		shift 2
+		;;
 	*)
 		echo "unknown argument: $1" >&2
 		exit 2
@@ -66,6 +71,13 @@ fi
 say() { printf '\n\033[0;32m==> %s\033[0m\n' "$1"; }
 die() {
 	printf '\n\033[0;31mFAIL: %s\033[0m\n' "$1" >&2
+	if [[ -n ${BACKUP:-} ]]; then
+		printf 'RECOVERY: restore from %s if the node is misbehaving:\n' "${BACKUP}" >&2
+		printf '  systemctl stop awg-quick@%s\n' "${NEW_IFACE}" >&2
+		printf '  cp -a %s/amneziawg/. /etc/amnezia/amneziawg/\n' "${BACKUP}" >&2
+		printf '  cp -a %s/env.bak /etc/wireguard-api/.env\n' "${BACKUP}" >&2
+		printf '  systemctl restart wireguard.service\n' >&2
+	fi
 	exit 1
 }
 
@@ -75,8 +87,24 @@ say "Preflight"
 bash "${SRC_DIR}/awg2-preflight.sh" --awg3 --port "${NEW_PORT}" --iface "${NEW_IFACE}" ||
 	die "preflight refused this node — fix the blocking issues first"
 
-CUR_IFACE=$(ip -br link show | grep -oE '^(awg|wg)[0-9]+' | head -1)
-[[ -n ${CUR_IFACE} ]] || die "no running AmneziaWG interface found — this script is for co-located installs only"
+if [[ -z ${CUR_IFACE} ]]; then
+	# Auto-detect the incumbent interface if not specified.
+	mapfile -t IFACES < <(ip -br link show | grep -oE '^(awg|wg)[0-9]+')
+
+	if [[ ${#IFACES[@]} -eq 0 ]]; then
+		die "no running AmneziaWG interface found — this script is for co-located installs only"
+	elif [[ ${#IFACES[@]} -eq 1 ]]; then
+		CUR_IFACE="${IFACES[0]}"
+	else
+		die "found multiple AmneziaWG interfaces: ${IFACES[*]}. Re-run with --incumbent <iface> to specify which one is the incumbent."
+	fi
+
+	# Validate that the detected interface is actually up.
+	${S} awg show "${CUR_IFACE}" >/dev/null 2>&1 || die "interface ${CUR_IFACE} is not running"
+else
+	# Validate that the specified interface is actually up.
+	${S} awg show "${CUR_IFACE}" >/dev/null 2>&1 || die "interface ${CUR_IFACE} is not running"
+fi
 PEERS_BEFORE=$(${S} awg show "${CUR_IFACE}" peers | wc -l | tr -d ' ')
 PUB_IP=$(${S} grep -E '^SERVER_PUB_IP=' /etc/amnezia/amneziawg/params | cut -d= -f2-)
 PUB_NIC=$(${S} grep -E '^SERVER_PUB_NIC=' /etc/amnezia/amneziawg/params | cut -d= -f2-)
@@ -110,9 +138,9 @@ fi
 say "Backup"
 STAMP=$(date +%Y%m%d-%H%M%S)
 BACKUP=/root/awg3-backup-${STAMP}
-${S} mkdir -p "${BACKUP}"
-${S} cp -a /etc/amnezia/amneziawg "${BACKUP}/"
-${S} cp -a /etc/wireguard-api/.env "${BACKUP}/env.bak"
+${S} mkdir -p "${BACKUP}" || die "failed to create backup directory ${BACKUP}"
+${S} cp -a /etc/amnezia/amneziawg "${BACKUP}/" || die "failed to backup /etc/amnezia/amneziawg to ${BACKUP}"
+${S} cp -a /etc/wireguard-api/.env "${BACKUP}/env.bak" || die "failed to backup /etc/wireguard-api/.env to ${BACKUP}"
 ${S} cp -a /usr/local/bin/wireguard "${BACKUP}/wireguard.bin" 2>/dev/null || true
 echo "  ${BACKUP}"
 
@@ -261,11 +289,16 @@ fi
 say "Settling for 60s (a bad WG_PARAMS_FILE restart-loops the API)"
 sleep 60
 check "node API after settle" "$(systemctl is-active wireguard.service)" "active"
-RESTARTS=$(systemctl show wireguard.service -p NRestarts --value)
-if [[ ${RESTARTS} -le 1 ]]; then
-	printf '  \033[0;32mOK\033[0m    node API restarts: %s\n' "${RESTARTS}"
+RESTARTS=$(systemctl show wireguard.service -p NRestarts --value 2>/dev/null || echo "unknown")
+if [[ ${RESTARTS} =~ ^[0-9]+$ ]]; then
+	if [[ ${RESTARTS} -le 1 ]]; then
+		printf '  \033[0;32mOK\033[0m    node API restarts: %s\n' "${RESTARTS}"
+	else
+		printf '  \033[0;31mBAD\033[0m   node API restarted %s times — check journalctl -u wireguard.service\n' "${RESTARTS}"
+		ERRORS=$((ERRORS + 1))
+	fi
 else
-	printf '  \033[0;31mBAD\033[0m   node API restarted %s times — check journalctl -u wireguard.service\n' "${RESTARTS}"
+	printf '  \033[0;31mBAD\033[0m   could not determine node API restart count (got %s) — check journalctl -u wireguard.service\n' "${RESTARTS}"
 	ERRORS=$((ERRORS + 1))
 fi
 
