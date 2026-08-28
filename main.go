@@ -1918,21 +1918,33 @@ func clientConfigExists(clientName string) bool {
 // count, and it counts real interface traffic rather than a sum of per-peer
 // counters that resets whenever a peer is re-added.
 func wireGuardStatsHandlerGin(c *gin.Context) {
-	nic := wgParams.ServerWGNIC
+	// Hosting providers meter the physical NIC, which on a VPN exit carries
+	// roughly twice the WireGuard tunnel (encrypted client side plus plaintext
+	// internet side). Report that interface so usage matches the invoice —
+	// reading the WG interface instead reports about half the billed traffic
+	// and lets over-quota nodes hide. Fall back to the WG interface only when
+	// SERVER_PUB_NIC is not configured.
+	billNIC := wgParams.ServerPubNIC
+	if billNIC == "" {
+		billNIC = defaultRouteNIC()
+	}
+	if billNIC == "" {
+		billNIC = wgParams.ServerWGNIC
+	}
 
-	rx, rxErr := readInterfaceCounter(nic, "rx_bytes")
-	tx, txErr := readInterfaceCounter(nic, "tx_bytes")
+	rx, rxErr := readInterfaceCounter(billNIC, "rx_bytes")
+	tx, txErr := readInterfaceCounter(billNIC, "tx_bytes")
 
 	if rxErr != nil || txErr != nil {
 		c.JSON(http.StatusOK, APIResponse{
 			Success: false,
-			Message: fmt.Sprintf("interface %s counters unavailable", nic),
+			Message: fmt.Sprintf("interface %s counters unavailable", billNIC),
 		})
 		return
 	}
 
 	peers := 0
-	if success, output := executeCommand(wgCmd, "show", nic, "peers"); success == "success" {
+	if success, output := executeCommand(wgCmd, "show", wgParams.ServerWGNIC, "peers"); success == "success" {
 		if trimmed := strings.TrimSpace(output); trimmed != "" {
 			peers = len(strings.Split(trimmed, "\n"))
 		}
@@ -1941,7 +1953,7 @@ func wireGuardStatsHandlerGin(c *gin.Context) {
 	c.JSON(http.StatusOK, APIResponse{
 		Success: true,
 		Data: map[string]interface{}{
-			"interface": nic,
+			"interface": billNIC,
 			"profile":   AWG_PROFILE,
 			"rx_bytes":  rx,
 			"tx_bytes":  tx,
@@ -1961,6 +1973,30 @@ func readInterfaceCounter(nic string, counter string) (uint64, error) {
 	}
 
 	return strconv.ParseUint(strings.TrimSpace(string(raw)), 10, 64)
+}
+
+// defaultRouteNIC returns the interface carrying the IPv4 default route — the
+// NIC a hosting provider meters — or "" if it cannot be determined. Used as a
+// fallback when SERVER_PUB_NIC is absent from the params file, which is common
+// on older provisions and would otherwise leave billing measured on the WG
+// tunnel (about half the real traffic).
+func defaultRouteNIC() string {
+	raw, err := os.ReadFile("/proc/net/route")
+	if err != nil {
+		return ""
+	}
+
+	lines := strings.Split(string(raw), "\n")
+	for _, line := range lines[1:] {
+		fields := strings.Fields(line)
+		// Columns: Iface Destination Flags ... — an all-zero destination is
+		// the default route, and its Iface is the metered NIC.
+		if len(fields) >= 2 && fields[1] == "00000000" {
+			return fields[0]
+		}
+	}
+
+	return ""
 }
 
 // systemUptimeSeconds returns 0 rather than an error when unreadable - it is

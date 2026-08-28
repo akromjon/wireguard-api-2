@@ -99,6 +99,7 @@ PrivateKey = server-private-key
 	paramsFileExplicit = false
 	wgParams = WGParams{
 		ServerPubIP:   "203.0.113.10",
+		ServerPubNIC:  "wg0",
 		ServerWGNIC:   "wg0",
 		ServerWGIPv4:  "10.66.0.1",
 		ServerPort:    "51820",
