@@ -375,4 +375,38 @@ if grep -q 'AWG_PROFILE=awg3' "${SCRIPT_DIR}/install2.sh"; then
 	fail "install2.sh must not reference awg3"
 fi
 
+# --- headless mode (strictly opt-in via NONINTERACTIVE=1) ----------------
+(
+	NONINTERACTIVE=1
+	noninteractive_enabled || fail "NONINTERACTIVE=1 must enable headless mode"
+)
+(
+	# Without NONINTERACTIVE=1 it must NOT be headless — even though the test
+	# runner's stdin is a pipe (not a tty). Existing behavior must be preserved.
+	unset NONINTERACTIVE
+	noninteractive_enabled && fail "must not be headless unless NONINTERACTIVE=1"
+	NONINTERACTIVE=0 noninteractive_enabled && fail "NONINTERACTIVE=0 must not be headless"
+	true
+)
+(
+	NONINTERACTIVE=1
+	SERVER_AWG_S1=""
+	ni_default SERVER_AWG_S1 99
+	[[ ${SERVER_AWG_S1} == 99 ]] || fail "ni_default must seed when headless (got '${SERVER_AWG_S1}')"
+)
+(
+	unset NONINTERACTIVE
+	if [ ! -t 0 ]; then :; fi
+	SERVER_AWG_S1="already"
+	NONINTERACTIVE=1 ni_default SERVER_AWG_S1 99
+	[[ ${SERVER_AWG_S1} == already ]] || fail "ni_default must not overwrite an existing value"
+)
+
+# Source guards: the UDP-port default is 443 under headless, and the confirm
+# gate is auto-satisfied — grep the source so a future edit can't regress it.
+grep -q 'ni_default SERVER_PORT 443' "${SCRIPT_DIR}/amneziawg-install.sh" ||
+	fail "headless SERVER_PORT default must be 443"
+grep -q 'INSTALL_CONFIRMATION="\${INSTALL_CONFIRMATION:-\${INSTALL_TOKEN}}"' "${SCRIPT_DIR}/amneziawg-install.sh" ||
+	fail "headless must auto-set INSTALL_CONFIRMATION to INSTALL_TOKEN"
+
 echo "installer parameter and coexistence tests passed"
