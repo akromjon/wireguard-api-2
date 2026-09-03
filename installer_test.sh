@@ -375,4 +375,253 @@ if grep -q 'AWG_PROFILE=awg3' "${SCRIPT_DIR}/install2.sh"; then
 	fail "install2.sh must not reference awg3"
 fi
 
+# --- headless mode (strictly opt-in via NONINTERACTIVE=1) ----------------
+(
+	NONINTERACTIVE=1
+	noninteractive_enabled || fail "NONINTERACTIVE=1 must enable headless mode"
+)
+(
+	# Without NONINTERACTIVE=1 it must NOT be headless — even though the test
+	# runner's stdin is a pipe (not a tty). Existing behavior must be preserved.
+	unset NONINTERACTIVE
+	noninteractive_enabled && fail "must not be headless unless NONINTERACTIVE=1"
+	NONINTERACTIVE=0 noninteractive_enabled && fail "NONINTERACTIVE=0 must not be headless"
+	true
+)
+(
+	NONINTERACTIVE=1
+	SERVER_AWG_S1=""
+	ni_default SERVER_AWG_S1 99
+	[[ ${SERVER_AWG_S1} == 99 ]] || fail "ni_default must seed when headless (got '${SERVER_AWG_S1}')"
+)
+(
+	unset NONINTERACTIVE
+	if [ ! -t 0 ]; then :; fi
+	SERVER_AWG_S1="already"
+	NONINTERACTIVE=1 ni_default SERVER_AWG_S1 99
+	[[ ${SERVER_AWG_S1} == already ]] || fail "ni_default must not overwrite an existing value"
+)
+
+# Source guards: the UDP-port default is 443 under headless (overridable via
+# WG_PORT — see below), and the confirm gate is auto-satisfied — grep the
+# source so a future edit can't regress it.
+grep -q 'ni_default SERVER_PORT "\${WG_PORT:-443}"' "${SCRIPT_DIR}/amneziawg-install.sh" ||
+	fail "headless SERVER_PORT default must be 443, overridable via WG_PORT"
+grep -q 'INSTALL_CONFIRMATION="\${INSTALL_CONFIRMATION:-\${INSTALL_TOKEN}}"' "${SCRIPT_DIR}/amneziawg-install.sh" ||
+	fail "headless must auto-set INSTALL_CONFIRMATION to INSTALL_TOKEN"
+
+# Fix wave: WG_PORT is the documented knob (README) for the headless AWG
+# listener port. An exported WG_PORT must seed SERVER_PORT when SERVER_PORT
+# itself is unset, but an explicit SERVER_PORT must still win (ni_default
+# only seeds when the target is unset).
+(
+	NONINTERACTIVE=1
+	unset SERVER_PORT
+	WG_PORT=51820
+	ni_default SERVER_PORT "${WG_PORT:-443}"
+	[[ ${SERVER_PORT} == 51820 ]] || fail "headless SERVER_PORT must default from WG_PORT (got '${SERVER_PORT}')"
+) || exit 1
+(
+	NONINTERACTIVE=1
+	SERVER_PORT=1234
+	WG_PORT=51820
+	ni_default SERVER_PORT "${WG_PORT:-443}"
+	[[ ${SERVER_PORT} == 1234 ]] || fail "an explicit SERVER_PORT must beat WG_PORT (got '${SERVER_PORT}')"
+) || exit 1
+
+# Fix wave: headless mode must fail loud (not fall through to the blocking
+# `read`) when SERVER_PORT is non-numeric or outside 1-9999, same as it
+# already does for a port that's in use. A functional test would need to
+# drive the installer's main flow end to end (not available in lib-only
+# mode), so this is a source-grep guard mirroring the existing in-use-port
+# grep style used elsewhere in this file (e.g. the SERVER_PORT default
+# guard above).
+if ! grep -qE 'noninteractive_enabled && \{ ! \[\[ \$\{SERVER_PORT\} =~ \^\[0-9\]\+\$ \]\] \|\| \[ "\$\{SERVER_PORT\}" -lt 1 \] \|\| \[ "\$\{SERVER_PORT\}" -gt 9999 \]; \}' "${SCRIPT_DIR}/amneziawg-install.sh"; then
+	fail "headless mode must fail loud on a non-numeric or out-of-range SERVER_PORT"
+fi
+
+# Round-1 fix: the remaining installQuestions prompts (API port, both DNS
+# resolvers, AllowedIPs, Jc) must also be pre-seeded under NONINTERACTIVE=1,
+# or a headless run still blocks on `read`. Assert each ni_default seed
+# exists AND appears before its prompt's `read -rp` line — fixed strings
+# (grep -F) so the regex metacharacters in the prompt text (brackets,
+# parens, ${...}) don't need escaping.
+assert_ni_default_precedes_read() {
+	local ni_pattern=$1 read_pattern=$2 label=$3
+	local ni_line read_line
+	ni_line=$(grep -n -F -m1 -- "${ni_pattern}" "${SCRIPT_DIR}/amneziawg-install.sh" | cut -d: -f1)
+	read_line=$(grep -n -F -m1 -- "${read_pattern}" "${SCRIPT_DIR}/amneziawg-install.sh" | cut -d: -f1)
+	[[ -n ${ni_line} ]] || fail "${label}: ni_default seed not found in amneziawg-install.sh"
+	[[ -n ${read_line} ]] || fail "${label}: read prompt not found in amneziawg-install.sh"
+	((ni_line < read_line)) || fail "${label}: ni_default must precede its read prompt"
+}
+
+assert_ni_default_precedes_read \
+	'ni_default API_PORT "${DEFAULT_API_PORT}"' \
+	'read -rp "AWG2 node API TCP port [1-65535]: "' \
+	"API_PORT"
+assert_ni_default_precedes_read \
+	'ni_default CLIENT_DNS_1 1.1.1.1' \
+	'read -rp "First DNS resolver to use for the clients: "' \
+	"CLIENT_DNS_1"
+assert_ni_default_precedes_read \
+	'ni_default CLIENT_DNS_2 1.0.0.1' \
+	'read -rp "Second DNS resolver to use for the clients (optional): "' \
+	"CLIENT_DNS_2"
+assert_ni_default_precedes_read \
+	"ni_default ALLOWED_IPS '0.0.0.0/0,::/0'" \
+	'read -rp "Allowed IPs list for generated clients (leave default to route everything): "' \
+	"ALLOWED_IPS"
+assert_ni_default_precedes_read \
+	'ni_default SERVER_AWG_JC "${RANDOM_AWG_JC}"' \
+	'read -rp "Server AmneziaWG Jc [1-128]: "' \
+	"SERVER_AWG_JC"
+
+# Behavioral check to match: seeding these five vars under NONINTERACTIVE=1
+# must actually work (not just be present in the source), using each
+# prompt's own default value.
+(
+	NONINTERACTIVE=1
+	unset API_PORT CLIENT_DNS_1 CLIENT_DNS_2 ALLOWED_IPS SERVER_AWG_JC
+	DEFAULT_API_PORT=8080
+	RANDOM_AWG_JC=7
+	ni_default API_PORT "${DEFAULT_API_PORT}"
+	ni_default CLIENT_DNS_1 1.1.1.1
+	ni_default CLIENT_DNS_2 1.0.0.1
+	ni_default ALLOWED_IPS '0.0.0.0/0,::/0'
+	ni_default SERVER_AWG_JC "${RANDOM_AWG_JC}"
+	[[ ${API_PORT} == 8080 ]] || fail "headless API_PORT must seed from DEFAULT_API_PORT"
+	[[ ${CLIENT_DNS_1} == 1.1.1.1 ]] || fail "headless CLIENT_DNS_1 must default to 1.1.1.1"
+	[[ ${CLIENT_DNS_2} == 1.0.0.1 ]] || fail "headless CLIENT_DNS_2 must default to 1.0.0.1"
+	[[ ${ALLOWED_IPS} == '0.0.0.0/0,::/0' ]] || fail "headless ALLOWED_IPS must default to 0.0.0.0/0,::/0"
+	[[ ${SERVER_AWG_JC} == 7 ]] || fail "headless SERVER_AWG_JC must seed from RANDOM_AWG_JC"
+) || exit 1
+
+# Round-2 fix: readIParams() gates on set-vs-unset (`+x`), and empty is the
+# valid "leave optional blank" answer, so ni_default (a non-empty seed) is
+# the wrong tool here. Under NONINTERACTIVE=1, an unset I-param must become
+# empty-but-set so the existing early-return fires and no read runs.
+# `</dev/null` proves this: if a read ran anyway, it would consume EOF
+# immediately rather than hang, so this alone wouldn't catch a regression —
+# the real proof is the assertions on SERVER_AWG_I1..I5 below.
+(
+	NONINTERACTIVE=1
+	unset SERVER_AWG_I1 SERVER_AWG_I2 SERVER_AWG_I3 SERVER_AWG_I4 SERVER_AWG_I5
+	readIParams </dev/null || fail "headless readIParams must not fail"
+	[[ -n ${SERVER_AWG_I1+x} && -z ${SERVER_AWG_I1} ]] || fail "headless readIParams must set SERVER_AWG_I1 empty, got '${SERVER_AWG_I1-<unset>}'"
+	[[ -n ${SERVER_AWG_I2+x} && -z ${SERVER_AWG_I2} ]] || fail "headless readIParams must set SERVER_AWG_I2 empty, got '${SERVER_AWG_I2-<unset>}'"
+	[[ -n ${SERVER_AWG_I3+x} && -z ${SERVER_AWG_I3} ]] || fail "headless readIParams must set SERVER_AWG_I3 empty, got '${SERVER_AWG_I3-<unset>}'"
+	[[ -n ${SERVER_AWG_I4+x} && -z ${SERVER_AWG_I4} ]] || fail "headless readIParams must set SERVER_AWG_I4 empty, got '${SERVER_AWG_I4-<unset>}'"
+	[[ -n ${SERVER_AWG_I5+x} && -z ${SERVER_AWG_I5} ]] || fail "headless readIParams must set SERVER_AWG_I5 empty, got '${SERVER_AWG_I5-<unset>}'"
+) || exit 1
+
+(
+	NONINTERACTIVE=1
+	SERVER_AWG_I1=foo
+	unset SERVER_AWG_I2 SERVER_AWG_I3 SERVER_AWG_I4 SERVER_AWG_I5
+	readIParams </dev/null || fail "headless readIParams must not fail"
+	[[ ${SERVER_AWG_I1} == foo ]] || fail "headless readIParams must not overwrite an exported SERVER_AWG_I1, got '${SERVER_AWG_I1}'"
+) || exit 1
+
+# Stronger regression proof than /dev/null: a dup'd fd shares its read
+# offset with the original, so if readIParams actually calls `read` at all,
+# it consumes bytes from that shared offset and a later read on the same fd
+# sees them gone. Verified empirically both ways before writing this: the
+# pre-fix function (5 unconditional reads) leaves the canary line consumed;
+# the fixed function (early-return, zero reads) leaves it untouched.
+(
+	NONINTERACTIVE=1
+	unset SERVER_AWG_I1 SERVER_AWG_I2 SERVER_AWG_I3 SERVER_AWG_I4 SERVER_AWG_I5
+	CANARY_FILE=$(mktemp)
+	trap 'rm -f "${CANARY_FILE}"' EXIT
+	printf 'canary\n' >"${CANARY_FILE}"
+	exec 3<"${CANARY_FILE}"
+	readIParams <&3
+	read -r leftover <&3
+	exec 3<&-
+	[[ ${leftover} == canary ]] || fail "headless readIParams must not consume stdin bytes (a real curl | bash pipe would lose script content); leftover='${leftover}'"
+) || exit 1
+
+# register_with_vipn_master must be fully env-driven when MASTER_TOKEN is set:
+# no prompts read at all (proved by </dev/null — a prompt would consume EOF
+# and end up empty, which this test would also catch via the missing
+# plan_type/vpn_type assertions below), and the register payload must carry
+# plan_type from TIER alongside the existing vpn_type.
+(
+	WIREGUARD_API_SERVICE_LIB_ONLY=1
+	source "${SCRIPT_DIR}/service.sh"
+
+	# Capture the register payload instead of hitting the network. Also stub
+	# the ipify public-IP lookup so the test is hermetic and doesn't fall
+	# through to the `hostname -I` fallback, which is GNU-only and errors on
+	# BSD/macOS hostname(1) — that fallback path is irrelevant to what this
+	# test verifies (env-driven prompts + plan_type in the payload).
+	CAPTURED_PAYLOAD=""
+	curl() {
+		while [[ $# -gt 0 ]]; do
+			if [[ $1 == -d ]]; then CAPTURED_PAYLOAD=$2; fi
+			if [[ $1 == *ipify* ]]; then echo "203.0.113.10"; fi
+			shift
+		done
+		return 0
+	}
+	# Minimal environment for the function.
+	UPGRADE_EXISTING_SERVICE=false
+	API_TOKEN="0123456789abcdef0123456789abcdef"
+	API_PORT=8080
+	MASTER_TOKEN="test-master-token"
+	TIER="free"
+
+	register_with_vipn_master </dev/null # </dev/null proves no prompt is read
+
+	[[ ${CAPTURED_PAYLOAD} == *'"plan_type":"free"'* ]] ||
+		fail "register payload must carry plan_type from TIER (got: ${CAPTURED_PAYLOAD})"
+	[[ ${CAPTURED_PAYLOAD} == *'"vpn_type":"amneziawg"'* ]] ||
+		fail "register payload must keep vpn_type amneziawg"
+) || exit 1
+
+# Fix wave: under headless mode (NONINTERACTIVE=1) with no MASTER_TOKEN,
+# register_with_vipn_master must not prompt at all — it must fall through to
+# the existing empty-token guard and return cleanly, not block on `read`.
+# Same canary-fd technique as the readIParams check above: a dup'd fd shares
+# its read offset with the original, so if `read` ran at all it would
+# consume the canary line even though the value is discarded — an untouched
+# canary is direct proof no `read` executed. The interactive path (this same
+# function with NONINTERACTIVE unset) is covered by the register test above
+# via MASTER_TOKEN being pre-set, and is left unchanged by this fix.
+(
+	WIREGUARD_API_SERVICE_LIB_ONLY=1
+	source "${SCRIPT_DIR}/service.sh"
+
+	NONINTERACTIVE=1
+	unset MASTER_TOKEN MASTER_URL
+	UPGRADE_EXISTING_SERVICE=false
+	API_TOKEN="0123456789abcdef0123456789abcdef"
+	API_PORT=8080
+	TIER="free"
+
+	CAPTURED_PAYLOAD=""
+	curl() {
+		while [[ $# -gt 0 ]]; do
+			if [[ $1 == -d ]]; then CAPTURED_PAYLOAD=$2; fi
+			shift
+		done
+		return 0
+	}
+
+	CANARY_FILE=$(mktemp)
+	trap 'rm -f "${CANARY_FILE}"' EXIT
+	printf 'canary\n' >"${CANARY_FILE}"
+	exec 3<"${CANARY_FILE}"
+	register_with_vipn_master <&3 ||
+		fail "headless register_with_vipn_master must return cleanly on an empty token"
+	read -r leftover <&3
+	exec 3<&-
+
+	[[ ${leftover} == canary ]] ||
+		fail "headless register_with_vipn_master must not prompt (stdin was consumed); leftover='${leftover}'"
+	[[ -z ${CAPTURED_PAYLOAD} ]] ||
+		fail "headless register_with_vipn_master must not call the register curl with an empty token (payload: ${CAPTURED_PAYLOAD})"
+) || exit 1
+
 echo "installer parameter and coexistence tests passed"

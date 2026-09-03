@@ -45,6 +45,20 @@ LEGACY_AWG_DETECTED=0
 AWG2_DETECTED=0
 AWG3_DETECTED=0
 
+# Headless install: STRICTLY opt-in. On only when NONINTERACTIVE=1 is exported.
+# No tty detection — a piped `curl | bash` without the flag keeps today's behavior.
+noninteractive_enabled() {
+	[[ ${NONINTERACTIVE:-0} == 1 ]]
+}
+
+# Seed a variable with a default ONLY in headless mode, and only when unset/empty.
+# In interactive mode this is a no-op so the existing until/read prompt runs.
+ni_default() {
+	local __name=$1 __default=$2
+	noninteractive_enabled || return 0
+	[[ -n ${!__name:-} ]] || printf -v "${__name}" '%s' "${__default}"
+}
+
 function array_contains() {
 	local expected=$1
 	shift
@@ -715,6 +729,8 @@ function readS3AndS4() {
 	# so 0 fails their guard and the loop runs.
 	SERVER_AWG_S3="${SERVER_AWG_S3:-}"
 	SERVER_AWG_S4="${SERVER_AWG_S4:-}"
+	ni_default SERVER_AWG_S3 "${RANDOM_AWG_S3}"
+	ni_default SERVER_AWG_S4 "${RANDOM_AWG_S4}"
 	local padding_hint
 	padding_hint=$(s_padding_hint)
 	if ((AWG3 == 1)); then
@@ -729,6 +745,9 @@ function readS3AndS4() {
 }
 
 function readIParams() {
+	if noninteractive_enabled; then
+		: "${SERVER_AWG_I1=}" "${SERVER_AWG_I2=}" "${SERVER_AWG_I3=}" "${SERVER_AWG_I4=}" "${SERVER_AWG_I5=}"
+	fi
 	if [[ -n ${SERVER_AWG_I1+x} && -n ${SERVER_AWG_I2+x} && -n ${SERVER_AWG_I3+x} && -n ${SERVER_AWG_I4+x} && -n ${SERVER_AWG_I5+x} ]]; then
 		return
 	fi
@@ -877,16 +896,18 @@ function installQuestions() {
 			# Detect public IPv6 address
 			SERVER_PUB_IP=$(ip -6 addr | sed -ne 's|^.* inet6 \([^/]*\)/.* scope global.*$|\1|p' | head -1)
 		fi
-		read -rp "Public IPv4 or IPv6 address or domain: " -e -i "${SERVER_PUB_IP}" SERVER_PUB_IP
+		noninteractive_enabled || read -rp "Public IPv4 or IPv6 address or domain: " -e -i "${SERVER_PUB_IP}" SERVER_PUB_IP
 	fi
 
 	# Detect public interface and pre-fill for the user
 	SERVER_NIC="$(ip -4 route ls | grep default | grep -Po '(?<=dev )(\S+)' | head -1)"
+	ni_default SERVER_PUB_NIC "${SERVER_NIC}"
 	until [[ ${SERVER_PUB_NIC} =~ ^[a-zA-Z0-9_]+$ ]]; do
 		read -rp "Public interface: " -e -i "${SERVER_NIC}" SERVER_PUB_NIC
 	done
 
 	DEFAULT_AWG_NIC=$(suggest_awg_interface)
+	ni_default SERVER_AWG_NIC "${DEFAULT_AWG_NIC}"
 	until [[ ${SERVER_AWG_NIC} =~ ^[a-zA-Z0-9_]+$ && ${#SERVER_AWG_NIC} -lt 16 ]] && ! interface_in_use "${SERVER_AWG_NIC}"; do
 		read -rp "New AWG2 interface name: " -e -i "${DEFAULT_AWG_NIC}" SERVER_AWG_NIC
 		if interface_in_use "${SERVER_AWG_NIC}"; then
@@ -894,6 +915,8 @@ function installQuestions() {
 		fi
 	done
 	configure_installation_layout
+	ni_default SERVER_AWG_IPV4 "${DEFAULT_AWG_IPV4}"
+	ni_default SERVER_AWG_IPV6 "${DEFAULT_AWG_IPV6}"
 
 	until [[ ${SERVER_AWG_IPV4} =~ ^([0-9]{1,3}\.){3} ]]; do
 		read -rp "New AWG2 tunnel IPv4: " -e -i "${DEFAULT_AWG_IPV4}" SERVER_AWG_IPV4
@@ -914,6 +937,15 @@ function installQuestions() {
 	# Amnezia's deployment guidance recommends ports up to 9999 because some
 	# networks block higher UDP ports. Keep that as the installer default.
 	RANDOM_PORT=$(suggest_udp_port)
+	ni_default SERVER_PORT "${WG_PORT:-443}"
+	if noninteractive_enabled && { ! [[ ${SERVER_PORT} =~ ^[0-9]+$ ]] || [ "${SERVER_PORT}" -lt 1 ] || [ "${SERVER_PORT}" -gt 9999 ]; }; then
+		echo "SERVER_PORT must be a number between 1 and 9999; got '${SERVER_PORT}'." >&2
+		exit 1
+	fi
+	if noninteractive_enabled && udp_port_in_use "${SERVER_PORT}"; then
+		echo "UDP ${SERVER_PORT} in use; set SERVER_PORT to a free port and re-run." >&2
+		exit 1
+	fi
 	until [[ ${SERVER_PORT} =~ ^[0-9]+$ ]] && [ "${SERVER_PORT}" -ge 1 ] && [ "${SERVER_PORT}" -le 9999 ] && ! udp_port_in_use "${SERVER_PORT}"; do
 		read -rp "New AWG2 UDP port [1-9999]: " -e -i "${RANDOM_PORT}" SERVER_PORT
 		if [[ ${SERVER_PORT} =~ ^[0-9]+$ ]] && udp_port_in_use "${SERVER_PORT}"; then
@@ -925,6 +957,7 @@ function installQuestions() {
 		echo "Reusing the existing node management API on TCP ${API_PORT}."
 	else
 		DEFAULT_API_PORT=$(suggest_api_port)
+		ni_default API_PORT "${DEFAULT_API_PORT}"
 		until [[ ${API_PORT} =~ ^[0-9]+$ ]] && ((API_PORT >= 1 && API_PORT <= 65535)) && ! tcp_port_in_use "${API_PORT}"; do
 			read -rp "AWG2 node API TCP port [1-65535]: " -e -i "${DEFAULT_API_PORT}" API_PORT
 			if [[ ${API_PORT} =~ ^[0-9]+$ ]] && tcp_port_in_use "${API_PORT}"; then
@@ -934,9 +967,11 @@ function installQuestions() {
 	fi
 
 	# Adguard DNS by default
+	ni_default CLIENT_DNS_1 1.1.1.1
 	until [[ ${CLIENT_DNS_1} =~ ^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$ ]]; do
 		read -rp "First DNS resolver to use for the clients: " -e -i 1.1.1.1 CLIENT_DNS_1
 	done
+	ni_default CLIENT_DNS_2 1.0.0.1
 	until [[ ${CLIENT_DNS_2} =~ ^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$ ]]; do
 		read -rp "Second DNS resolver to use for the clients (optional): " -e -i 1.0.0.1 CLIENT_DNS_2
 		if [[ ${CLIENT_DNS_2} == "" ]]; then
@@ -944,6 +979,7 @@ function installQuestions() {
 		fi
 	done
 
+	ni_default ALLOWED_IPS '0.0.0.0/0,::/0'
 	until [[ ${ALLOWED_IPS} =~ ^.+$ ]]; do
 		echo -e "\nAmneziaWG uses a parameter called AllowedIPs to determine what is routed over the VPN."
 		read -rp "Allowed IPs list for generated clients (leave default to route everything): " -e -i '0.0.0.0/0,::/0' ALLOWED_IPS
@@ -954,11 +990,14 @@ function installQuestions() {
 
 	# Jc
 	RANDOM_AWG_JC=$(shuf -i3-10 -n1)
+	ni_default SERVER_AWG_JC "${RANDOM_AWG_JC}"
 	until [[ ${SERVER_AWG_JC} =~ ^[0-9]+$ ]] && ((${SERVER_AWG_JC} >= 1)) && ((${SERVER_AWG_JC} <= 128)); do
 		read -rp "Server AmneziaWG Jc [1-128]: " -e -i ${RANDOM_AWG_JC} SERVER_AWG_JC
 	done
 
 	# Jmin && Jmax
+	ni_default SERVER_AWG_JMIN 50
+	ni_default SERVER_AWG_JMAX 1000
 	readJminAndJmax
 	until [ "${SERVER_AWG_JMIN}" -le "${SERVER_AWG_JMAX}" ]; do
 		echo "AmneziaWG require Jmin < Jmax"
@@ -970,6 +1009,8 @@ function installQuestions() {
 	while ((${RANDOM_AWG_S1} + 56 == ${RANDOM_AWG_S2})); do
 		generateS1AndS2
 	done
+	ni_default SERVER_AWG_S1 "${RANDOM_AWG_S1}"
+	ni_default SERVER_AWG_S2 "${RANDOM_AWG_S2}"
 	readS1AndS2
 	while ((${SERVER_AWG_S1} + 56 == ${SERVER_AWG_S2})); do
 		echo "AmneziaWG require S1 + 56 <> S2"
@@ -978,6 +1019,10 @@ function installQuestions() {
 
 	# H1 && H2 && H3 && H4
 	generateH1AndH2AndH3AndH4
+	ni_default SERVER_AWG_H1 "${RANDOM_AWG_H1}"
+	ni_default SERVER_AWG_H2 "${RANDOM_AWG_H2}"
+	ni_default SERVER_AWG_H3 "${RANDOM_AWG_H3}"
+	ni_default SERVER_AWG_H4 "${RANDOM_AWG_H4}"
 	readH1AndH2AndH3AndH4
 	while h_specs_overlap "${SERVER_AWG_H1}" "${SERVER_AWG_H2}" "${SERVER_AWG_H3}" "${SERVER_AWG_H4}"; do
 		echo "AmneziaWG requires H1, H2, H3, and H4 ranges not to overlap"
@@ -1021,6 +1066,7 @@ function installQuestions() {
 	echo ""
 
 	validate_installation_choices || exit 1
+	noninteractive_enabled && INSTALL_CONFIRMATION="${INSTALL_CONFIRMATION:-${INSTALL_TOKEN}}"
 	if [[ -z ${INSTALL_CONFIRMATION:-} ]]; then
 		read -rp "Type ${INSTALL_TOKEN} to confirm these changes: " INSTALL_CONFIRMATION
 	fi
