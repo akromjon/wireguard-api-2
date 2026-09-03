@@ -81,8 +81,7 @@ curl -fsSL https://raw.githubusercontent.com/akromjon/wireguard-api-2/main/insta
   | sudo NONINTERACTIVE=1 MASTER_TOKEN=<token> TIER=free bash
 ```
 
-Headless mode (auto-on when stdin is not a tty, or force with `NONINTERACTIVE=1`)
-uses generated defaults for every prompt and self-registers with the VIPN master.
+Headless mode is opt-in via `NONINTERACTIVE=1` (nothing is auto-detected). It uses generated defaults for every prompt and self-registers with the VIPN master.
 
 Env knobs: `MASTER_TOKEN` (required to self-register), `MASTER_URL`
 (default `https://api.vipn.io`), `TIER` (`free`|`premium`, default `free`),
