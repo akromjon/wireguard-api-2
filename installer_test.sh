@@ -409,4 +409,61 @@ grep -q 'ni_default SERVER_PORT 443' "${SCRIPT_DIR}/amneziawg-install.sh" ||
 grep -q 'INSTALL_CONFIRMATION="\${INSTALL_CONFIRMATION:-\${INSTALL_TOKEN}}"' "${SCRIPT_DIR}/amneziawg-install.sh" ||
 	fail "headless must auto-set INSTALL_CONFIRMATION to INSTALL_TOKEN"
 
+# Round-1 fix: the remaining installQuestions prompts (API port, both DNS
+# resolvers, AllowedIPs, Jc) must also be pre-seeded under NONINTERACTIVE=1,
+# or a headless run still blocks on `read`. Assert each ni_default seed
+# exists AND appears before its prompt's `read -rp` line — fixed strings
+# (grep -F) so the regex metacharacters in the prompt text (brackets,
+# parens, ${...}) don't need escaping.
+assert_ni_default_precedes_read() {
+	local ni_pattern=$1 read_pattern=$2 label=$3
+	local ni_line read_line
+	ni_line=$(grep -n -F -m1 -- "${ni_pattern}" "${SCRIPT_DIR}/amneziawg-install.sh" | cut -d: -f1)
+	read_line=$(grep -n -F -m1 -- "${read_pattern}" "${SCRIPT_DIR}/amneziawg-install.sh" | cut -d: -f1)
+	[[ -n ${ni_line} ]] || fail "${label}: ni_default seed not found in amneziawg-install.sh"
+	[[ -n ${read_line} ]] || fail "${label}: read prompt not found in amneziawg-install.sh"
+	((ni_line < read_line)) || fail "${label}: ni_default must precede its read prompt"
+}
+
+assert_ni_default_precedes_read \
+	'ni_default API_PORT "${DEFAULT_API_PORT}"' \
+	'read -rp "AWG2 node API TCP port [1-65535]: "' \
+	"API_PORT"
+assert_ni_default_precedes_read \
+	'ni_default CLIENT_DNS_1 1.1.1.1' \
+	'read -rp "First DNS resolver to use for the clients: "' \
+	"CLIENT_DNS_1"
+assert_ni_default_precedes_read \
+	'ni_default CLIENT_DNS_2 1.0.0.1' \
+	'read -rp "Second DNS resolver to use for the clients (optional): "' \
+	"CLIENT_DNS_2"
+assert_ni_default_precedes_read \
+	"ni_default ALLOWED_IPS '0.0.0.0/0,::/0'" \
+	'read -rp "Allowed IPs list for generated clients (leave default to route everything): "' \
+	"ALLOWED_IPS"
+assert_ni_default_precedes_read \
+	'ni_default SERVER_AWG_JC "${RANDOM_AWG_JC}"' \
+	'read -rp "Server AmneziaWG Jc [1-128]: "' \
+	"SERVER_AWG_JC"
+
+# Behavioral check to match: seeding these five vars under NONINTERACTIVE=1
+# must actually work (not just be present in the source), using each
+# prompt's own default value.
+(
+	NONINTERACTIVE=1
+	unset API_PORT CLIENT_DNS_1 CLIENT_DNS_2 ALLOWED_IPS SERVER_AWG_JC
+	DEFAULT_API_PORT=8080
+	RANDOM_AWG_JC=7
+	ni_default API_PORT "${DEFAULT_API_PORT}"
+	ni_default CLIENT_DNS_1 1.1.1.1
+	ni_default CLIENT_DNS_2 1.0.0.1
+	ni_default ALLOWED_IPS '0.0.0.0/0,::/0'
+	ni_default SERVER_AWG_JC "${RANDOM_AWG_JC}"
+	[[ ${API_PORT} == 8080 ]] || fail "headless API_PORT must seed from DEFAULT_API_PORT"
+	[[ ${CLIENT_DNS_1} == 1.1.1.1 ]] || fail "headless CLIENT_DNS_1 must default to 1.1.1.1"
+	[[ ${CLIENT_DNS_2} == 1.0.0.1 ]] || fail "headless CLIENT_DNS_2 must default to 1.0.0.1"
+	[[ ${ALLOWED_IPS} == '0.0.0.0/0,::/0' ]] || fail "headless ALLOWED_IPS must default to 0.0.0.0/0,::/0"
+	[[ ${SERVER_AWG_JC} == 7 ]] || fail "headless SERVER_AWG_JC must seed from RANDOM_AWG_JC"
+) || exit 1
+
 echo "installer parameter and coexistence tests passed"

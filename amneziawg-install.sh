@@ -950,6 +950,7 @@ function installQuestions() {
 		echo "Reusing the existing node management API on TCP ${API_PORT}."
 	else
 		DEFAULT_API_PORT=$(suggest_api_port)
+		ni_default API_PORT "${DEFAULT_API_PORT}"
 		until [[ ${API_PORT} =~ ^[0-9]+$ ]] && ((API_PORT >= 1 && API_PORT <= 65535)) && ! tcp_port_in_use "${API_PORT}"; do
 			read -rp "AWG2 node API TCP port [1-65535]: " -e -i "${DEFAULT_API_PORT}" API_PORT
 			if [[ ${API_PORT} =~ ^[0-9]+$ ]] && tcp_port_in_use "${API_PORT}"; then
@@ -959,9 +960,11 @@ function installQuestions() {
 	fi
 
 	# Adguard DNS by default
+	ni_default CLIENT_DNS_1 1.1.1.1
 	until [[ ${CLIENT_DNS_1} =~ ^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$ ]]; do
 		read -rp "First DNS resolver to use for the clients: " -e -i 1.1.1.1 CLIENT_DNS_1
 	done
+	ni_default CLIENT_DNS_2 1.0.0.1
 	until [[ ${CLIENT_DNS_2} =~ ^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$ ]]; do
 		read -rp "Second DNS resolver to use for the clients (optional): " -e -i 1.0.0.1 CLIENT_DNS_2
 		if [[ ${CLIENT_DNS_2} == "" ]]; then
@@ -969,6 +972,7 @@ function installQuestions() {
 		fi
 	done
 
+	ni_default ALLOWED_IPS '0.0.0.0/0,::/0'
 	until [[ ${ALLOWED_IPS} =~ ^.+$ ]]; do
 		echo -e "\nAmneziaWG uses a parameter called AllowedIPs to determine what is routed over the VPN."
 		read -rp "Allowed IPs list for generated clients (leave default to route everything): " -e -i '0.0.0.0/0,::/0' ALLOWED_IPS
@@ -979,6 +983,7 @@ function installQuestions() {
 
 	# Jc
 	RANDOM_AWG_JC=$(shuf -i3-10 -n1)
+	ni_default SERVER_AWG_JC "${RANDOM_AWG_JC}"
 	until [[ ${SERVER_AWG_JC} =~ ^[0-9]+$ ]] && ((${SERVER_AWG_JC} >= 1)) && ((${SERVER_AWG_JC} <= 128)); do
 		read -rp "Server AmneziaWG Jc [1-128]: " -e -i ${RANDOM_AWG_JC} SERVER_AWG_JC
 	done
