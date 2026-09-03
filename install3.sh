@@ -44,9 +44,7 @@ cd "${TEMP_DIR}/source"
 chmod +x amneziawg-install.sh service.sh
 
 # This entry point is AWG3-only: the installed interface enables header
-# protection, so it serves iOS 12.3.0+ and Android 2.4.2+ clients only. Mark
-# the resulting server with is_support_awg_third in the admin panel. Use
-# install2.sh for an AWG2 node.
+# protection. Use install2.sh for an AWG2 node.
 export AWG_PROFILE=awg3
 ./amneziawg-install.sh
 

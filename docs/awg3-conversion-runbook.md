@@ -43,19 +43,10 @@ ssh root@46.224.140.182 "cd /var/www/api.vipn.io && php artisan list | grep awg3
 One line back means you are good. Nothing back means deploy it before touching
 any node — see the backend-deployment skill.
 
-Confirm the node is not on the macOS floor. **298 Stockholm and 304 Milan stay
-AWG2 permanently** — they are the only servers a macOS client can be offered,
-because `client_supports_awg3` denies macOS unconditionally. Converting them
-strands every macOS user with a 404 and no Fastest fallback.
-
-**The row is NOT flagged before the cutover.** `servers:awg3-cutover` sets
-`is_support_awg_third` on the clone, at cutover, and never on the row that is
-still serving. Flagging early would hide the city from every old-iOS and macOS
-client for the whole (unbounded) wait for a zero-live-peer moment — which
-breaks "nobody may be left unable to connect" just as surely as a dropped
-tunnel. The hazard that early flag was guarding — something writing AWG3
-configs into the still-AWG2 row — is closed instead by pausing the crons
-(below) and by the Filament actions now being disabled on non-active rows.
+The backend no longer tracks a per-server AWG3 capability flag. The cutover
+therefore changes only the config pool and active/inactive row state. Client
+compatibility must already be enforced by the app update policy before a node
+is converted.
 
 ## Naming the incumbent interface, and getting a shell on the node
 
@@ -364,12 +355,12 @@ retry after you delete the half-built clone.
 
 ```bash
 php artisan tinker --execute='
-foreach (DB::select("SELECT id,status,is_support_awg_third,max_connections,current_connections FROM servers WHERE ip = ? AND deleted_at IS NULL ORDER BY id", ["<node-ip>"]) as $r) { echo json_encode($r), PHP_EOL; }
+foreach (DB::select("SELECT id,status,max_connections,current_connections FROM servers WHERE ip = ? AND deleted_at IS NULL ORDER BY id", ["<node-ip>"]) as $r) { echo json_encode($r), PHP_EOL; }
 '
 ```
 
-Expect two rows: the new clone `active` with `is_support_awg_third = 1`, and the
-old row `inactive` with the flag still `0`. Capacity must not have shrunk.
+Expect two rows: the new clone `active` and the old row `inactive`. Capacity
+must not have shrunk.
 
 Then watch the clone over the next hours. `servers:connect-check` runs every
 minute and disables rows it judges unreachable — and on 8443 a converted row may
@@ -437,9 +428,6 @@ After the row cutover, reverse the flip, on the backend box:
 ```bash
 php artisan tinker --execute='App\Models\Server::find(<old-id>)->update(["status" => "active"]); App\Models\Server::find(<clone-id>)->update(["status" => "inactive"]);'
 ```
-
-The old row never had `is_support_awg_third` set, so there is nothing to un-set
-— it becomes visible to every client again the moment it is active.
 
 Live users were never moved, so there is nothing to undo on the node itself.
 

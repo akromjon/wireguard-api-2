@@ -123,12 +123,9 @@ Plan for $(hostname):
   after     backend cutover with --configs=${PEERS_BEFORE}
 
 WARNING: the shared node API is repointed to AWG3 by this install, while the
-backend row for this node stays AWG2 until the cutover. Do NOT flag the row
-is_support_awg_third now — that would hide the city from every old-iOS and
-macOS client for the whole (unbounded) wait for a zero-live-peer moment.
-
-Instead, nothing may write to this node from the old row while that gap is
-open. Before running --apply: pause the configs:cleanup-stale schedule (it
+backend row for this node stays on its existing config pool until the cutover.
+Nothing may write to this node from the old row while that gap is open. Before
+running --apply: pause the configs:cleanup-stale schedule (it
 recreates configs through the node API every 10 minutes), and do not use the
 Filament Sync Server / Add Users / Delete All Users actions. See the "Pause the
 crons" section of docs/awg3-conversion-runbook.md.
@@ -197,7 +194,6 @@ cd "${SRC_DIR}"
 ${S} env \
 	AWG_PROFILE=awg3 \
 	INSTALL_ALONGSIDE=y \
-	AWG3_COLOCATED_ACK=1 \
 	INSTALL_CONFIRMATION=INSTALL-AWG3 \
 	SERVER_PUB_IP="${PUB_IP}" \
 	SERVER_PUB_NIC="${PUB_NIC}" \

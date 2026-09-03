@@ -207,22 +207,6 @@ declare -F assert_awg3_supported >/dev/null || fail "assert_awg3_supported must 
 	[[ -z $(s_padding_hint) ]] || fail "awg3 S3/S4 prompt must not offer the 0-disables hint"
 ) || exit 1
 
-# A co-located AWG3 install (adding awg3 beside an already-registered API)
-# must refuse to proceed without an explicit acknowledgement that the backend
-# server record already has is_support_awg_third set — otherwise the
-# rewritten .env silently hands unusable configs to pre-12.3.0 clients on the
-# same token and port.
-awg3_colocated_reuse_acknowledged "1" ||
-	fail "AWG3_COLOCATED_ACK=1 must acknowledge the co-located warning"
-awg3_colocated_reuse_acknowledged "AWG3-COLOCATED-ACK" ||
-	fail "the typed confirmation token must acknowledge the co-located warning"
-if awg3_colocated_reuse_acknowledged ""; then
-	fail "an empty acknowledgement must not satisfy the co-located gate"
-fi
-if awg3_colocated_reuse_acknowledged "y"; then
-	fail "an unrelated answer must not satisfy the co-located gate"
-fi
-
 h_spec_bounds "5" || fail "single H value should be valid"
 h_spec_bounds "5-10" || fail "H range should be valid"
 if h_spec_bounds "4"; then

@@ -689,18 +689,6 @@ function assert_awg3_supported() {
 	return 1
 }
 
-# Gate a co-located AWG3 install (REUSE_EXISTING_API=1) on an explicit
-# operator acknowledgement. Rewriting the live .env of an already-registered
-# node's API to AWG_PROFILE=awg3 keeps the same port and token, so the
-# backend server record for that node must already have is_support_awg_third
-# set before the API restarts — otherwise it hands unusable AWG3 configs to
-# every pre-12.3.0 client with zero replies and no error anywhere. Extracted
-# so the gate is testable without driving an interactive read.
-function awg3_colocated_reuse_acknowledged() {
-	local ack=$1
-	[[ ${ack} == "1" || ${ack} == "AWG3-COLOCATED-ACK" ]]
-}
-
 # Validates an S3/S4 padding answer. Extracted so the prompt guard is
 # testable without driving an interactive read.
 function s_padding_in_range() {
@@ -1017,14 +1005,7 @@ function installQuestions() {
 	echo "  New tunnel addresses: ${SERVER_AWG_IPV4}/16, ${SERVER_AWG_IPV6}/64"
 	if [[ ${REUSE_EXISTING_API} == 1 ]]; then
 		echo "  Management API: upgrade ${API_SERVICE_NAME} on existing TCP ${API_PORT}"
-		if ((AWG3 == 1)); then
-			echo "    Existing API token: preserved"
-			echo -e "    ${RED}WARNING: the backend server record for this node is NOT updated by this installer.${NC}"
-			echo -e "    ${RED}Its is_support_awg_third flag MUST already be set before the API restarts, or${NC}"
-			echo -e "    ${RED}pre-12.3.0 clients holding this node's config get zero replies with no error anywhere.${NC}"
-		else
-			echo "    Existing API token and backend server record: preserved"
-		fi
+		echo "    Existing API token and backend server record: preserved"
 		echo "    New API target: ${AMNEZIAWG_DIR}/${SERVER_AWG_NIC}.conf"
 		echo "    Legacy ${LEGACY_WG_CONFIG_FILE}: remains running during config rotation"
 	else
@@ -1038,22 +1019,6 @@ function installQuestions() {
 		echo "  Serves iOS 12.3.0+ and Android 2.4.2+ clients only"
 	fi
 	echo ""
-
-	# A co-located AWG3 install (REUSE_EXISTING_API=1) reuses the already
-	# registered node API instead of creating a new backend record. Refuse to
-	# proceed without an explicit acknowledgement that is_support_awg_third is
-	# already set on that record. A fresh node never reaches this: it always
-	# has REUSE_EXISTING_API=0.
-	if ((AWG3 == 1 && REUSE_EXISTING_API == 1)); then
-		if [[ -z ${AWG3_COLOCATED_ACK:-} ]] && [[ -t 0 ]]; then
-			read -rp "Type AWG3-COLOCATED-ACK to confirm the backend record already has is_support_awg_third set: " AWG3_COLOCATED_ACK
-		fi
-		if ! awg3_colocated_reuse_acknowledged "${AWG3_COLOCATED_ACK:-}"; then
-			echo "Installation cancelled; no configuration changes were made."
-			echo "Set is_support_awg_third on this node's backend server record, then rerun with AWG3_COLOCATED_ACK=1 exported (or confirm interactively)."
-			exit 0
-		fi
-	fi
 
 	validate_installation_choices || exit 1
 	if [[ -z ${INSTALL_CONFIRMATION:-} ]]; then
