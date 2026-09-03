@@ -72,6 +72,23 @@ run, since most fleet hosts already carry a registered interface. The backend
 record is unchanged by the installer. A fresh host with no existing interface
 creates a new API identity as before.
 
+## Headless install (one command, no prompts)
+
+On a clean Ubuntu box:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/akromjon/wireguard-api-2/main/install3.sh \
+  | sudo NONINTERACTIVE=1 MASTER_TOKEN=<token> TIER=free bash
+```
+
+Headless mode (auto-on when stdin is not a tty, or force with `NONINTERACTIVE=1`)
+uses generated defaults for every prompt and self-registers with the VIPN master.
+
+Env knobs: `MASTER_TOKEN` (required to self-register), `MASTER_URL`
+(default `https://api.vipn.io`), `TIER` (`free`|`premium`, default `free`),
+`SERVER_PORT`/`WG_PORT` (AWG UDP listener, default `443`), and any `SERVER_AWG_*`
+override. Do not set `USE_UDP_443_ENDPOINT=true`.
+
 ## AWG2 configuration
 
 The installer asks for the AmneziaWG parameters and writes the same values to
