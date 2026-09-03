@@ -511,4 +511,42 @@ assert_ni_default_precedes_read \
 	[[ ${leftover} == canary ]] || fail "headless readIParams must not consume stdin bytes (a real curl | bash pipe would lose script content); leftover='${leftover}'"
 ) || exit 1
 
+# register_with_vipn_master must be fully env-driven when MASTER_TOKEN is set:
+# no prompts read at all (proved by </dev/null — a prompt would consume EOF
+# and end up empty, which this test would also catch via the missing
+# plan_type/vpn_type assertions below), and the register payload must carry
+# plan_type from TIER alongside the existing vpn_type.
+(
+	WIREGUARD_API_SERVICE_LIB_ONLY=1
+	source "${SCRIPT_DIR}/service.sh"
+
+	# Capture the register payload instead of hitting the network. Also stub
+	# the ipify public-IP lookup so the test is hermetic and doesn't fall
+	# through to the `hostname -I` fallback, which is GNU-only and errors on
+	# BSD/macOS hostname(1) — that fallback path is irrelevant to what this
+	# test verifies (env-driven prompts + plan_type in the payload).
+	CAPTURED_PAYLOAD=""
+	curl() {
+		while [[ $# -gt 0 ]]; do
+			if [[ $1 == -d ]]; then CAPTURED_PAYLOAD=$2; fi
+			if [[ $1 == *ipify* ]]; then echo "203.0.113.10"; fi
+			shift
+		done
+		return 0
+	}
+	# Minimal environment for the function.
+	UPGRADE_EXISTING_SERVICE=false
+	API_TOKEN="0123456789abcdef0123456789abcdef"
+	API_PORT=8080
+	MASTER_TOKEN="test-master-token"
+	TIER="free"
+
+	register_with_vipn_master </dev/null # </dev/null proves no prompt is read
+
+	[[ ${CAPTURED_PAYLOAD} == *'"plan_type":"free"'* ]] ||
+		fail "register payload must carry plan_type from TIER (got: ${CAPTURED_PAYLOAD})"
+	[[ ${CAPTURED_PAYLOAD} == *'"vpn_type":"amneziawg"'* ]] ||
+		fail "register payload must keep vpn_type amneziawg"
+) || exit 1
+
 echo "installer parameter and coexistence tests passed"

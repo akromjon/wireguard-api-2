@@ -227,19 +227,19 @@ register_with_vipn_master() {
 		echo "Existing VIPN server record remains on ${API_PORT} with its current API token; skipping duplicate registration."
 		return
 	fi
-	read -rp "Register this AWG2 node with VIPN master? [Y/n]: " REGISTER_WITH_MASTER
-	REGISTER_WITH_MASTER=${REGISTER_WITH_MASTER:-Y}
-	if [[ ! ${REGISTER_WITH_MASTER} =~ ^[Yy]$ ]]; then
-		echo "Skipping VIPN master registration. You can still add this server manually."
-		return
+	if [[ -z ${MASTER_TOKEN:-} ]]; then
+		read -rp "Register this AWG2 node with VIPN master? [Y/n]: " REGISTER_WITH_MASTER
+		REGISTER_WITH_MASTER=${REGISTER_WITH_MASTER:-Y}
+		if [[ ! ${REGISTER_WITH_MASTER} =~ ^[Yy]$ ]]; then
+			echo "Skipping VIPN master registration. You can still add this server manually."
+			return
+		fi
+		read -rp "Enter VIPN master API URL [https://api.vipn.io]: " MASTER_URL
+		read -rsp "Enter VIPN master provisioning token: " MASTER_TOKEN
+		echo ""
 	fi
-
-	read -rp "Enter VIPN master API URL [https://api.vipn.io]: " MASTER_URL
 	MASTER_URL=${MASTER_URL:-https://api.vipn.io}
 	MASTER_URL=${MASTER_URL%/}
-
-	read -rsp "Enter VIPN master provisioning token: " MASTER_TOKEN
-	echo ""
 	if [[ -z ${MASTER_TOKEN} ]]; then
 		echo "VIPN master provisioning token is empty. Skipping registration."
 		return
@@ -261,7 +261,8 @@ register_with_vipn_master() {
 		return
 	fi
 
-	register_payload=$(printf '{"ip":"%s","port":%s,"api_key":"%s","vpn_type":"amneziawg"}' "${public_ip}" "${API_PORT}" "${api_token}")
+	local plan_type=${TIER:-free}
+	register_payload=$(printf '{"ip":"%s","port":%s,"api_key":"%s","vpn_type":"amneziawg","plan_type":"%s"}' "${public_ip}" "${API_PORT}" "${api_token}" "${plan_type}")
 	echo "Registering this AWG2 API instance with VIPN master..."
 	if curl -fsS \
 		-H "Authorization: Bearer ${MASTER_TOKEN}" \
