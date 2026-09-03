@@ -745,6 +745,9 @@ function readS3AndS4() {
 }
 
 function readIParams() {
+	if noninteractive_enabled; then
+		: "${SERVER_AWG_I1=}" "${SERVER_AWG_I2=}" "${SERVER_AWG_I3=}" "${SERVER_AWG_I4=}" "${SERVER_AWG_I5=}"
+	fi
 	if [[ -n ${SERVER_AWG_I1+x} && -n ${SERVER_AWG_I2+x} && -n ${SERVER_AWG_I3+x} && -n ${SERVER_AWG_I4+x} && -n ${SERVER_AWG_I5+x} ]]; then
 		return
 	fi

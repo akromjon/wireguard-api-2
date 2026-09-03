@@ -466,4 +466,49 @@ assert_ni_default_precedes_read \
 	[[ ${SERVER_AWG_JC} == 7 ]] || fail "headless SERVER_AWG_JC must seed from RANDOM_AWG_JC"
 ) || exit 1
 
+# Round-2 fix: readIParams() gates on set-vs-unset (`+x`), and empty is the
+# valid "leave optional blank" answer, so ni_default (a non-empty seed) is
+# the wrong tool here. Under NONINTERACTIVE=1, an unset I-param must become
+# empty-but-set so the existing early-return fires and no read runs.
+# `</dev/null` proves this: if a read ran anyway, it would consume EOF
+# immediately rather than hang, so this alone wouldn't catch a regression —
+# the real proof is the assertions on SERVER_AWG_I1..I5 below.
+(
+	NONINTERACTIVE=1
+	unset SERVER_AWG_I1 SERVER_AWG_I2 SERVER_AWG_I3 SERVER_AWG_I4 SERVER_AWG_I5
+	readIParams </dev/null || fail "headless readIParams must not fail"
+	[[ -n ${SERVER_AWG_I1+x} && -z ${SERVER_AWG_I1} ]] || fail "headless readIParams must set SERVER_AWG_I1 empty, got '${SERVER_AWG_I1-<unset>}'"
+	[[ -n ${SERVER_AWG_I2+x} && -z ${SERVER_AWG_I2} ]] || fail "headless readIParams must set SERVER_AWG_I2 empty, got '${SERVER_AWG_I2-<unset>}'"
+	[[ -n ${SERVER_AWG_I3+x} && -z ${SERVER_AWG_I3} ]] || fail "headless readIParams must set SERVER_AWG_I3 empty, got '${SERVER_AWG_I3-<unset>}'"
+	[[ -n ${SERVER_AWG_I4+x} && -z ${SERVER_AWG_I4} ]] || fail "headless readIParams must set SERVER_AWG_I4 empty, got '${SERVER_AWG_I4-<unset>}'"
+	[[ -n ${SERVER_AWG_I5+x} && -z ${SERVER_AWG_I5} ]] || fail "headless readIParams must set SERVER_AWG_I5 empty, got '${SERVER_AWG_I5-<unset>}'"
+) || exit 1
+
+(
+	NONINTERACTIVE=1
+	SERVER_AWG_I1=foo
+	unset SERVER_AWG_I2 SERVER_AWG_I3 SERVER_AWG_I4 SERVER_AWG_I5
+	readIParams </dev/null || fail "headless readIParams must not fail"
+	[[ ${SERVER_AWG_I1} == foo ]] || fail "headless readIParams must not overwrite an exported SERVER_AWG_I1, got '${SERVER_AWG_I1}'"
+) || exit 1
+
+# Stronger regression proof than /dev/null: a dup'd fd shares its read
+# offset with the original, so if readIParams actually calls `read` at all,
+# it consumes bytes from that shared offset and a later read on the same fd
+# sees them gone. Verified empirically both ways before writing this: the
+# pre-fix function (5 unconditional reads) leaves the canary line consumed;
+# the fixed function (early-return, zero reads) leaves it untouched.
+(
+	NONINTERACTIVE=1
+	unset SERVER_AWG_I1 SERVER_AWG_I2 SERVER_AWG_I3 SERVER_AWG_I4 SERVER_AWG_I5
+	CANARY_FILE=$(mktemp)
+	trap 'rm -f "${CANARY_FILE}"' EXIT
+	printf 'canary\n' >"${CANARY_FILE}"
+	exec 3<"${CANARY_FILE}"
+	readIParams <&3
+	read -r leftover <&3
+	exec 3<&-
+	[[ ${leftover} == canary ]] || fail "headless readIParams must not consume stdin bytes (a real curl | bash pipe would lose script content); leftover='${leftover}'"
+) || exit 1
+
 echo "installer parameter and coexistence tests passed"
