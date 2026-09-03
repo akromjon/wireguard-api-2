@@ -227,7 +227,7 @@ register_with_vipn_master() {
 		echo "Existing VIPN server record remains on ${API_PORT} with its current API token; skipping duplicate registration."
 		return
 	fi
-	if [[ -z ${MASTER_TOKEN:-} ]]; then
+	if [[ -z ${MASTER_TOKEN:-} ]] && [[ ${NONINTERACTIVE:-0} != 1 ]]; then
 		read -rp "Register this AWG2 node with VIPN master? [Y/n]: " REGISTER_WITH_MASTER
 		REGISTER_WITH_MASTER=${REGISTER_WITH_MASTER:-Y}
 		if [[ ! ${REGISTER_WITH_MASTER} =~ ^[Yy]$ ]]; then
@@ -240,7 +240,7 @@ register_with_vipn_master() {
 	fi
 	MASTER_URL=${MASTER_URL:-https://api.vipn.io}
 	MASTER_URL=${MASTER_URL%/}
-	if [[ -z ${MASTER_TOKEN} ]]; then
+	if [[ -z ${MASTER_TOKEN:-} ]]; then
 		echo "VIPN master provisioning token is empty. Skipping registration."
 		return
 	fi

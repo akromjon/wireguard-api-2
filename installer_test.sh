@@ -402,12 +402,43 @@ fi
 	[[ ${SERVER_AWG_S1} == already ]] || fail "ni_default must not overwrite an existing value"
 )
 
-# Source guards: the UDP-port default is 443 under headless, and the confirm
-# gate is auto-satisfied — grep the source so a future edit can't regress it.
-grep -q 'ni_default SERVER_PORT 443' "${SCRIPT_DIR}/amneziawg-install.sh" ||
-	fail "headless SERVER_PORT default must be 443"
+# Source guards: the UDP-port default is 443 under headless (overridable via
+# WG_PORT — see below), and the confirm gate is auto-satisfied — grep the
+# source so a future edit can't regress it.
+grep -q 'ni_default SERVER_PORT "\${WG_PORT:-443}"' "${SCRIPT_DIR}/amneziawg-install.sh" ||
+	fail "headless SERVER_PORT default must be 443, overridable via WG_PORT"
 grep -q 'INSTALL_CONFIRMATION="\${INSTALL_CONFIRMATION:-\${INSTALL_TOKEN}}"' "${SCRIPT_DIR}/amneziawg-install.sh" ||
 	fail "headless must auto-set INSTALL_CONFIRMATION to INSTALL_TOKEN"
+
+# Fix wave: WG_PORT is the documented knob (README) for the headless AWG
+# listener port. An exported WG_PORT must seed SERVER_PORT when SERVER_PORT
+# itself is unset, but an explicit SERVER_PORT must still win (ni_default
+# only seeds when the target is unset).
+(
+	NONINTERACTIVE=1
+	unset SERVER_PORT
+	WG_PORT=51820
+	ni_default SERVER_PORT "${WG_PORT:-443}"
+	[[ ${SERVER_PORT} == 51820 ]] || fail "headless SERVER_PORT must default from WG_PORT (got '${SERVER_PORT}')"
+) || exit 1
+(
+	NONINTERACTIVE=1
+	SERVER_PORT=1234
+	WG_PORT=51820
+	ni_default SERVER_PORT "${WG_PORT:-443}"
+	[[ ${SERVER_PORT} == 1234 ]] || fail "an explicit SERVER_PORT must beat WG_PORT (got '${SERVER_PORT}')"
+) || exit 1
+
+# Fix wave: headless mode must fail loud (not fall through to the blocking
+# `read`) when SERVER_PORT is non-numeric or outside 1-9999, same as it
+# already does for a port that's in use. A functional test would need to
+# drive the installer's main flow end to end (not available in lib-only
+# mode), so this is a source-grep guard mirroring the existing in-use-port
+# grep style used elsewhere in this file (e.g. the SERVER_PORT default
+# guard above).
+if ! grep -qE 'noninteractive_enabled && \{ ! \[\[ \$\{SERVER_PORT\} =~ \^\[0-9\]\+\$ \]\] \|\| \[ "\$\{SERVER_PORT\}" -lt 1 \] \|\| \[ "\$\{SERVER_PORT\}" -gt 9999 \]; \}' "${SCRIPT_DIR}/amneziawg-install.sh"; then
+	fail "headless mode must fail loud on a non-numeric or out-of-range SERVER_PORT"
+fi
 
 # Round-1 fix: the remaining installQuestions prompts (API port, both DNS
 # resolvers, AllowedIPs, Jc) must also be pre-seeded under NONINTERACTIVE=1,
@@ -547,6 +578,50 @@ assert_ni_default_precedes_read \
 		fail "register payload must carry plan_type from TIER (got: ${CAPTURED_PAYLOAD})"
 	[[ ${CAPTURED_PAYLOAD} == *'"vpn_type":"amneziawg"'* ]] ||
 		fail "register payload must keep vpn_type amneziawg"
+) || exit 1
+
+# Fix wave: under headless mode (NONINTERACTIVE=1) with no MASTER_TOKEN,
+# register_with_vipn_master must not prompt at all — it must fall through to
+# the existing empty-token guard and return cleanly, not block on `read`.
+# Same canary-fd technique as the readIParams check above: a dup'd fd shares
+# its read offset with the original, so if `read` ran at all it would
+# consume the canary line even though the value is discarded — an untouched
+# canary is direct proof no `read` executed. The interactive path (this same
+# function with NONINTERACTIVE unset) is covered by the register test above
+# via MASTER_TOKEN being pre-set, and is left unchanged by this fix.
+(
+	WIREGUARD_API_SERVICE_LIB_ONLY=1
+	source "${SCRIPT_DIR}/service.sh"
+
+	NONINTERACTIVE=1
+	unset MASTER_TOKEN MASTER_URL
+	UPGRADE_EXISTING_SERVICE=false
+	API_TOKEN="0123456789abcdef0123456789abcdef"
+	API_PORT=8080
+	TIER="free"
+
+	CAPTURED_PAYLOAD=""
+	curl() {
+		while [[ $# -gt 0 ]]; do
+			if [[ $1 == -d ]]; then CAPTURED_PAYLOAD=$2; fi
+			shift
+		done
+		return 0
+	}
+
+	CANARY_FILE=$(mktemp)
+	trap 'rm -f "${CANARY_FILE}"' EXIT
+	printf 'canary\n' >"${CANARY_FILE}"
+	exec 3<"${CANARY_FILE}"
+	register_with_vipn_master <&3 ||
+		fail "headless register_with_vipn_master must return cleanly on an empty token"
+	read -r leftover <&3
+	exec 3<&-
+
+	[[ ${leftover} == canary ]] ||
+		fail "headless register_with_vipn_master must not prompt (stdin was consumed); leftover='${leftover}'"
+	[[ -z ${CAPTURED_PAYLOAD} ]] ||
+		fail "headless register_with_vipn_master must not call the register curl with an empty token (payload: ${CAPTURED_PAYLOAD})"
 ) || exit 1
 
 echo "installer parameter and coexistence tests passed"

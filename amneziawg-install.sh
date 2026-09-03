@@ -937,7 +937,11 @@ function installQuestions() {
 	# Amnezia's deployment guidance recommends ports up to 9999 because some
 	# networks block higher UDP ports. Keep that as the installer default.
 	RANDOM_PORT=$(suggest_udp_port)
-	ni_default SERVER_PORT 443
+	ni_default SERVER_PORT "${WG_PORT:-443}"
+	if noninteractive_enabled && { ! [[ ${SERVER_PORT} =~ ^[0-9]+$ ]] || [ "${SERVER_PORT}" -lt 1 ] || [ "${SERVER_PORT}" -gt 9999 ]; }; then
+		echo "SERVER_PORT must be a number between 1 and 9999; got '${SERVER_PORT}'." >&2
+		exit 1
+	fi
 	if noninteractive_enabled && udp_port_in_use "${SERVER_PORT}"; then
 		echo "UDP ${SERVER_PORT} in use; set SERVER_PORT to a free port and re-run." >&2
 		exit 1
