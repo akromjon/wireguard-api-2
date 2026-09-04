@@ -85,6 +85,7 @@ Headless mode is opt-in via `NONINTERACTIVE=1` (nothing is auto-detected). It us
 
 Env knobs: `MASTER_TOKEN` (required to self-register), `MASTER_URL`
 (default `https://api.vipn.io`), `TIER` (`free`|`premium`, default `free`),
+`CONFIG_POOL` (configs the master pre-generates on register; master default `1000`),
 `SERVER_PORT`/`WG_PORT` (AWG UDP listener, default `443`), and any `SERVER_AWG_*`
 override. Do not set `USE_UDP_443_ENDPOINT=true`.
 

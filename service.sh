@@ -262,7 +262,11 @@ register_with_vipn_master() {
 	fi
 
 	local plan_type=${TIER:-free}
-	register_payload=$(printf '{"ip":"%s","port":%s,"api_key":"%s","vpn_type":"amneziawg","plan_type":"%s"}' "${public_ip}" "${API_PORT}" "${api_token}" "${plan_type}")
+	local pool_field=""
+	if [[ ${CONFIG_POOL:-} =~ ^[0-9]+$ ]]; then
+		pool_field=$(printf ',"config_pool":%s' "${CONFIG_POOL}")
+	fi
+	register_payload=$(printf '{"ip":"%s","port":%s,"api_key":"%s","vpn_type":"amneziawg","plan_type":"%s"%s}' "${public_ip}" "${API_PORT}" "${api_token}" "${plan_type}" "${pool_field}")
 	echo "Registering this AWG2 API instance with VIPN master..."
 	if curl -fsS \
 		-H "Authorization: Bearer ${MASTER_TOKEN}" \

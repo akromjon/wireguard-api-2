@@ -578,6 +578,18 @@ assert_ni_default_precedes_read \
 		fail "register payload must carry plan_type from TIER (got: ${CAPTURED_PAYLOAD})"
 	[[ ${CAPTURED_PAYLOAD} == *'"vpn_type":"amneziawg"'* ]] ||
 		fail "register payload must keep vpn_type amneziawg"
+	[[ ${CAPTURED_PAYLOAD} != *'config_pool'* ]] ||
+		fail "register payload must omit config_pool when CONFIG_POOL is unset (got: ${CAPTURED_PAYLOAD})"
+
+	CONFIG_POOL=200
+	register_with_vipn_master </dev/null
+	[[ ${CAPTURED_PAYLOAD} == *'"config_pool":200}'* ]] ||
+		fail "register payload must carry config_pool from CONFIG_POOL (got: ${CAPTURED_PAYLOAD})"
+
+	CONFIG_POOL=abc
+	register_with_vipn_master </dev/null
+	[[ ${CAPTURED_PAYLOAD} != *'config_pool'* ]] ||
+		fail "register payload must ignore non-numeric CONFIG_POOL (got: ${CAPTURED_PAYLOAD})"
 ) || exit 1
 
 # Fix wave: under headless mode (NONINTERACTIVE=1) with no MASTER_TOKEN,
