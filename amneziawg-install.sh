@@ -175,6 +175,10 @@ function udp_port_in_use() {
 	if ((${#EXISTING_AWG_PORTS[@]} > 0)) && array_contains "${port}" "${EXISTING_AWG_PORTS[@]}"; then
 		return 0
 	fi
+	# The node API's UDP echo listens on the same number as its TCP API port.
+	if ((${#EXISTING_API_PORTS[@]} > 0)) && array_contains "${port}" "${EXISTING_API_PORTS[@]}"; then
+		return 0
+	fi
 	if command -v ss >/dev/null 2>&1 && ss -H -lun 2>/dev/null | grep -Eq ":${port}[[:space:]]"; then
 		return 0
 	fi

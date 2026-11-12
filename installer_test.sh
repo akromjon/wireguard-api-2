@@ -636,4 +636,17 @@ assert_ni_default_precedes_read \
 		fail "headless register_with_vipn_master must not call the register curl with an empty token (payload: ${CAPTURED_PAYLOAD})"
 ) || exit 1
 
+# A new AWG listener must never take a UDP port the node API's echo uses.
+(
+	EXISTING_API_PORTS=(8081)
+	EXISTING_AWG_PORTS=()
+	udp_port_in_use 8081 || fail "udp_port_in_use must report an existing API port as taken"
+	if udp_port_in_use 8082; then
+		fail "udp_port_in_use must not report a port that is neither an API nor an AWG port (8082)"
+	fi
+) || exit 1
+
+grep -q '^ECHO_ENABLED=1$' "${SCRIPT_DIR}/.env.example" ||
+	fail ".env.example must carry ECHO_ENABLED=1"
+
 echo "installer parameter and coexistence tests passed"

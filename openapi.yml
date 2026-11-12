@@ -351,6 +351,45 @@ paths:
         '404':
           description: Unauthorized - Missing or invalid API token
 
+  /api/stats:
+    get:
+      summary: Get interface byte counters
+      description: Cheap, side-effect-free counters for the billed network interface.
+      operationId: getStats
+      responses:
+        '200':
+          description: Interface counters
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  data:
+                    type: object
+                    properties:
+                      interface:
+                        type: string
+                        example: eth0
+                      profile:
+                        type: string
+                        example: awg2
+                      rx_bytes:
+                        type: integer
+                      tx_bytes:
+                        type: integer
+                      peers:
+                        type: integer
+                      uptime_seconds:
+                        type: integer
+                      echo_replies_total:
+                        type: integer
+                        description: UDP echo replies sent since the API process started.
+        '401':
+          description: Unauthorized - Missing or invalid API token
+
   /api/wireguard/start:
     post:
       summary: Start the WireGuard service

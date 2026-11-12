@@ -200,6 +200,21 @@ It verifies that the existing token now reaches `awg1` on the existing TCP
 port. If verification fails, the installer restores the previous binary,
 environment, and systemd unit. It does not create a duplicate backend record.
 
+## UDP echo
+
+The API process also answers a tiny UDP echo so phones can measure round-trip
+time to the node.
+
+- Packet: exactly 24 bytes. `LGN1`, 8 id bytes, a 4-byte big-endian sequence,
+  8 zero bytes. The reply is the same 24 bytes sent back. Anything else is
+  dropped with no reply.
+- Limit: at most 20 replies per second per source address.
+- `ECHO_ENABLED=1` (default; `0` turns the echo off).
+- `ECHO_PORT` sets the UDP port. Default is the same number as `API_PORT`.
+- API ports are 8080-8199 on shared boxes. The installer treats each API port
+  as taken for UDP too, so a new AmneziaWG listener never uses it.
+- `/api/stats` reports `echo_replies_total`.
+
 ## Build and test
 
 ```bash
