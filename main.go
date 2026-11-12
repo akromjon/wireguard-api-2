@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
@@ -295,6 +296,14 @@ func main() {
 
 	// Start server
 	router := newRouter()
+	if echoConn, err := startEcho(); err != nil {
+		// A busy UDP port must never stop the API.
+		log.Printf("UDP echo not started: %v", err)
+	} else if echoConn != nil {
+		go serveEcho(echoConn, newEchoLimiter(echoMaxPerSecond, time.Now))
+		log.Printf("UDP echo listening on port %s", getEnv("ECHO_PORT", API_PORT))
+	}
+
 	log.Printf("WireGuard API server running on port %s", API_PORT)
 	log.Fatal(router.Run(":" + API_PORT))
 }
@@ -1952,16 +1961,7 @@ func wireGuardStatsHandlerGin(c *gin.Context) {
 
 	c.JSON(http.StatusOK, APIResponse{
 		Success: true,
-		Data: map[string]interface{}{
-			"interface": billNIC,
-			"profile":   AWG_PROFILE,
-			"rx_bytes":  rx,
-			"tx_bytes":  tx,
-			"peers":     peers,
-			// Counters are cumulative since the interface came up, so the
-			// consumer needs this to turn them into a rate.
-			"uptime_seconds": systemUptimeSeconds(),
-		},
+		Data:    statsPayload(billNIC, rx, tx, peers),
 	})
 }
 
