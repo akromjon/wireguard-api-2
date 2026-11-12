@@ -2,7 +2,12 @@ package main
 
 import (
 	"bytes"
+	"errors"
+	"log"
 	"net"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -178,3 +183,125 @@ func TestStatsPayloadCarriesEchoCounter(t *testing.T) {
 		}
 	}
 }
+
+// freeUDPPort returns a UDP port number that is free right now.
+func freeUDPPort(t *testing.T) string {
+	t.Helper()
+	c, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	_, port, _ := net.SplitHostPort(c.LocalAddr().String())
+	return port
+}
+
+// withVPNFiles points the port discovery at a temp dir holding the given
+// files (name -> content) and clears the other inputs.
+func withVPNFiles(t *testing.T, files map[string]string) string {
+	t.Helper()
+	dir := t.TempDir()
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldDirs, oldParams, oldCfg := vpnPortDirs, WG_PARAMS_FILE, WG_CONFIG_FILE
+	vpnPortDirs = []string{dir}
+	WG_PARAMS_FILE = filepath.Join(dir, "params")
+	WG_CONFIG_FILE = filepath.Join(dir, "awg0.conf")
+	t.Cleanup(func() { vpnPortDirs, WG_PARAMS_FILE, WG_CONFIG_FILE = oldDirs, oldParams, oldCfg })
+	return dir
+}
+
+func TestStartEchoRefusesPortOfAWGInterfaceConfig(t *testing.T) {
+	port := freeUDPPort(t)
+	withVPNFiles(t, map[string]string{
+		"awg0.conf": "[Interface]\nPrivateKey = x\nListenPort = 1111\n",
+		"awg1.conf": "[Interface]\nPrivateKey = y\nListenPort = " + port + "\n",
+	})
+	t.Setenv("ECHO_ENABLED", "1")
+	t.Setenv("ECHO_PORT", port)
+	conn, err := startEcho()
+	if conn != nil {
+		conn.Close()
+		t.Fatal("echo listened on an AWG listen port")
+	}
+	if err != nil {
+		t.Fatalf("err = %v; want nil", err)
+	}
+}
+
+func TestStartEchoRefusesPortOfParamsServerPort(t *testing.T) {
+	port := freeUDPPort(t)
+	withVPNFiles(t, map[string]string{"params": "SERVER_PORT=\"" + port + "\"\nSERVER_AWG_NIC=awg0\n"})
+	t.Setenv("ECHO_ENABLED", "1")
+	t.Setenv("ECHO_PORT", port)
+	conn, err := startEcho()
+	if conn != nil {
+		conn.Close()
+		t.Fatal("echo listened on SERVER_PORT")
+	}
+	if err != nil {
+		t.Fatalf("err = %v; want nil", err)
+	}
+}
+
+func TestStartEchoStartsWhenPortDiffers(t *testing.T) {
+	port := freeUDPPort(t)
+	withVPNFiles(t, map[string]string{
+		"awg0.conf": "[Interface]\nListenPort = 1111\n",
+		"params":    "SERVER_PORT=2222\n",
+	})
+	t.Setenv("ECHO_ENABLED", "1")
+	t.Setenv("ECHO_PORT", port)
+	conn, err := startEcho()
+	if err != nil || conn == nil {
+		t.Fatalf("got %v, %v; want a listener", conn, err)
+	}
+	conn.Close()
+}
+
+func TestStartEchoStartsWhenConfigsUnreadable(t *testing.T) {
+	port := freeUDPPort(t)
+	withVPNFiles(t, nil) // no params, no configs
+	vpnPortDirs = []string{filepath.Join(t.TempDir(), "missing")}
+	t.Setenv("ECHO_ENABLED", "1")
+	t.Setenv("ECHO_PORT", port)
+	conn, err := startEcho()
+	if err != nil || conn == nil {
+		t.Fatalf("got %v, %v; want a listener", conn, err)
+	}
+	conn.Close()
+}
+
+func TestStartEchoIgnoresGarbageInConfigs(t *testing.T) {
+	port := freeUDPPort(t)
+	withVPNFiles(t, map[string]string{
+		"awg0.conf": "ListenPort = notanumber\nListenPort=\n",
+		"params":    "SERVER_PORT=\n",
+	})
+	t.Setenv("ECHO_ENABLED", "1")
+	t.Setenv("ECHO_PORT", port)
+	conn, err := startEcho()
+	if err != nil || conn == nil {
+		t.Fatalf("got %v, %v; want a listener", conn, err)
+	}
+	conn.Close()
+}
+
+func TestServeEchoLogsOnceOnReadError(t *testing.T) {
+	var buf bytes.Buffer
+	old := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(old)
+
+	serveEcho(failingConn{}, newEchoLimiter(echoMaxPerSecond, time.Now))
+	if got := strings.Count(buf.String(), "UDP echo stopped"); got != 1 {
+		t.Fatalf("want one stop line, got %d: %q", got, buf.String())
+	}
+}
+
+type failingConn struct{ net.PacketConn }
+
+func (failingConn) ReadFrom([]byte) (int, net.Addr, error) { return 0, nil, errors.New("boom") }

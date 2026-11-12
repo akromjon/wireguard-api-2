@@ -1,7 +1,13 @@
 package main
 
 import (
+	"bufio"
+	"log"
 	"net"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -76,6 +82,7 @@ func serveEcho(conn net.PacketConn, limiter *echoLimiter) {
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {
 				continue
 			}
+			log.Printf("UDP echo stopped: %v", err)
 			return
 		}
 		if !validEchoPacket(buf[:n]) {
@@ -96,12 +103,76 @@ func serveEcho(conn net.PacketConn, limiter *echoLimiter) {
 	}
 }
 
-// startEcho opens the echo socket. It returns nil, nil when ECHO_ENABLED=0.
+// vpnPortDirs are the directories scanned for AmneziaWG/WireGuard interface
+// configs (*.conf) and params files (params*). The directory of WG_CONFIG_FILE
+// is scanned as well.
+var vpnPortDirs = []string{"/etc/amnezia/amneziawg", "/etc/wireguard"}
+
+// parseKeyPort returns the port in a "KEY = value" line when the key matches.
+func parseKeyPort(line, key string) (int, bool) {
+	k, v, ok := strings.Cut(line, "=")
+	if !ok || strings.TrimSpace(k) != key {
+		return 0, false
+	}
+	n, err := strconv.Atoi(strings.Trim(strings.TrimSpace(v), "\"'"))
+	if err != nil || n < 1 || n > 65535 {
+		return 0, false
+	}
+	return n, true
+}
+
+func collectPorts(path, key string, ports map[int]bool) {
+	f, err := os.Open(path)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		if n, ok := parseKeyPort(sc.Text(), key); ok {
+			ports[n] = true
+		}
+	}
+}
+
+// vpnListenPorts returns the UDP ports that AmneziaWG/WireGuard interfaces on
+// this box listen on: SERVER_PORT of the params file(s) and ListenPort of every
+// interface config. It reads a few small files once and never runs commands.
+// The set is empty when nothing could be read.
+func vpnListenPorts() map[int]bool {
+	ports := map[int]bool{}
+	collectPorts(WG_PARAMS_FILE, "SERVER_PORT", ports)
+	collectPorts(WG_CONFIG_FILE, "ListenPort", ports)
+	dirs := append([]string{filepath.Dir(WG_CONFIG_FILE)}, vpnPortDirs...)
+	for _, dir := range dirs {
+		confs, _ := filepath.Glob(filepath.Join(dir, "*.conf"))
+		for _, c := range confs {
+			collectPorts(c, "ListenPort", ports)
+		}
+		params, _ := filepath.Glob(filepath.Join(dir, "params*"))
+		for _, p := range params {
+			collectPorts(p, "SERVER_PORT", ports)
+		}
+	}
+	return ports
+}
+
+// startEcho opens the echo socket. It returns nil, nil when ECHO_ENABLED=0 or
+// when the echo port is a VPN listen port on this box: the VPN must always be
+// able to bind its port, so echo yields.
 func startEcho() (net.PacketConn, error) {
 	if getEnv(echoDefaultEnabledEnv, "1") == "0" {
 		return nil, nil
 	}
-	return net.ListenPacket("udp", ":"+getEnv("ECHO_PORT", API_PORT))
+	port := getEnv("ECHO_PORT", API_PORT)
+	vpnPorts := vpnListenPorts()
+	if len(vpnPorts) == 0 {
+		log.Printf("UDP echo: VPN listen ports could not be determined, port check skipped")
+	} else if n, err := strconv.Atoi(port); err == nil && vpnPorts[n] {
+		log.Printf("UDP echo not started: port %s is a VPN listen port on this box", port)
+		return nil, nil
+	}
+	return net.ListenPacket("udp", ":"+port)
 }
 
 // statsPayload is the body of a successful /stats response.

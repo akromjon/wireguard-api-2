@@ -387,7 +387,7 @@ paths:
                       echo_replies_total:
                         type: integer
                         description: UDP echo replies sent since the API process started.
-        '401':
+        '404':
           description: Unauthorized - Missing or invalid API token
 
   /api/wireguard/start:

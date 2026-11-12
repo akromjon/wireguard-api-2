@@ -213,6 +213,14 @@ time to the node.
 - `ECHO_PORT` sets the UDP port. Default is the same number as `API_PORT`.
 - API ports are 8080-8199 on shared boxes. The installer treats each API port
   as taken for UDP too, so a new AmneziaWG listener never uses it.
+- Echo never takes a VPN port. At start the API reads `SERVER_PORT` from the
+  params file(s) and `ListenPort` from the interface configs (`*.conf`) in
+  `/etc/amnezia/amneziawg`, `/etc/wireguard` and the folder of `WG_CONFIG_FILE`.
+  If the echo port is one of them, echo does not start and one line is logged.
+  If none of these can be read, echo starts and the check is logged as skipped.
+  Ports of interfaces kept elsewhere are not seen.
+- A custom `ECHO_PORT` is not protected by the installer's port check: the
+  installer only keeps API ports free. Choose a port no AWG interface uses.
 - `/api/stats` reports `echo_replies_total`.
 
 ## Build and test
