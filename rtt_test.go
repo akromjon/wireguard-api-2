@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/netip"
 	"strings"
@@ -418,6 +419,12 @@ func TestRTTRouteSeventhCallInAMinuteIs429(t *testing.T) {
 	}
 }
 
+func TestRTTRequestTimeoutDefaultIs8Seconds(t *testing.T) {
+	if rttRequestTimeout != 8*time.Second {
+		t.Errorf("rttRequestTimeout = %v, want 8s", rttRequestTimeout)
+	}
+}
+
 func TestRTTRouteOverallDeadlineStillAnswers200(t *testing.T) {
 	old := rttRequestTimeout
 	rttRequestTimeout = 50 * time.Millisecond
@@ -431,7 +438,7 @@ func TestRTTRouteOverallDeadlineStillAnswers200(t *testing.T) {
 	env := newRTTRouterEnv(t, d)
 	start := time.Now()
 	rec := env.authedRequest(t, "POST", "/api/rtt", rttReq(rttTarget{ID: "a", Host: "slow", Port: 443}))
-	if time.Since(start) > 5*time.Second {
+	if time.Since(start) > time.Second {
 		t.Error("handler did not honour the overall deadline")
 	}
 	if rec.Code != http.StatusOK {
@@ -444,4 +451,82 @@ func TestRTTRouteOverallDeadlineStillAnswers200(t *testing.T) {
 	if v, ok := body.Data.RTT["a"]; !ok || v != nil {
 		t.Errorf("a = %v (present %v), want present and null", v, ok)
 	}
+}
+
+func TestMeasureAllPanicInOneTargetLeavesItNil(t *testing.T) {
+	deps := rttDeps{
+		resolve: func(ctx context.Context, host string) ([]netip.Addr, error) {
+			if host == "boom.test" {
+				panic("resolver exploded")
+			}
+			return []netip.Addr{netip.MustParseAddr("8.8.8.8")}, nil
+		},
+		dial: func(ctx context.Context, addr netip.AddrPort, timeout time.Duration) (time.Duration, error) {
+			return 17 * time.Millisecond, nil
+		},
+		own: func() ([]netip.Addr, error) { return nil, nil },
+	}
+	got := measureAll(context.Background(), deps, []rttTarget{
+		{ID: "ok", Host: "ok.test", Port: 443},
+		{ID: "boom", Host: "boom.test", Port: 443},
+	})
+	if v, ok := got["boom"]; !ok || v != nil {
+		t.Errorf("boom = %v (present %v), want present and nil", v, ok)
+	}
+	if got["ok"] == nil || *got["ok"] != 17 {
+		t.Errorf("ok = %v, want 17", got["ok"])
+	}
+}
+
+// --- real dialer and own-address lookup, loopback only ---
+
+func TestDefaultDialConnectsToLocalListener(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
+	ap := netip.MustParseAddrPort(ln.Addr().String())
+	took, err := defaultRTTDeps().dial(context.Background(), ap, time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	if took < 0 {
+		t.Errorf("duration %v, want >= 0", took)
+	}
+}
+
+func TestDefaultDialClosedPortFails(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ap := netip.MustParseAddrPort(ln.Addr().String())
+	ln.Close() // the port is now closed
+	if _, err := defaultRTTDeps().dial(context.Background(), ap, time.Second); err == nil {
+		t.Fatal("dial to a closed port must fail")
+	}
+}
+
+func TestOwnAddrsContainsLoopback(t *testing.T) {
+	addrs, err := ownAddrs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	lo := netip.MustParseAddr("127.0.0.1")
+	for _, a := range addrs {
+		if a == lo {
+			return
+		}
+	}
+	t.Errorf("ownAddrs %v lacks 127.0.0.1", addrs)
 }

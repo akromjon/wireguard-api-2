@@ -217,7 +217,8 @@ The route needs the usual `key` header.
   link-local, reserved or this node's own address gives `null`, with no
   connection made. If this node's addresses cannot be read, every target is
   `null`.
-- `RTT_ENABLED=0` turns the route off: it answers 404, like a wrong key.
+- `RTT_ENABLED=0` turns the route off: it answers 404, like a wrong key. Only the exact value `0` turns it off, and the service must
+  be restarted because `.env` is read at start.
 
 ## UDP echo
 

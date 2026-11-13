@@ -187,10 +187,16 @@ func measureAll(ctx context.Context, d rttDeps, targets []rttTarget) map[string]
 		wg.Add(1)
 		go func(t rttTarget) {
 			defer wg.Done()
-			r := measureTarget(ctx, d, t)
-			mu.Lock()
-			out[t.ID] = r
-			mu.Unlock()
+			// gin's recovery does not cover goroutines we start: a panic here
+			// would end the whole process. Leave the target null instead.
+			var r *int
+			defer func() {
+				_ = recover()
+				mu.Lock()
+				out[t.ID] = r
+				mu.Unlock()
+			}()
+			r = measureTarget(ctx, d, t)
 		}(t)
 	}
 	wg.Wait()
