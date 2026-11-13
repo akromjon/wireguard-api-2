@@ -390,6 +390,70 @@ paths:
         '404':
           description: Unauthorized - Missing or invalid API token
 
+  /api/rtt:
+    post:
+      summary: Measure TCP connect time to region hosts
+      description: |
+        Connects to each target on port 443 (3 tries, 1 s timeout each) and
+        returns the lowest connect time in ms (at least 1), or null when there is
+        no result. Only public addresses are used. At most 6 requests per minute.
+        `RTT_ENABLED=0` makes the route answer 404.
+      operationId: measureRtt
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [targets]
+              properties:
+                targets:
+                  type: array
+                  minItems: 1
+                  maxItems: 16
+                  items:
+                    type: object
+                    required: [id, host, port]
+                    properties:
+                      id:
+                        type: string
+                        minLength: 1
+                        maxLength: 64
+                        description: Unique within the request.
+                        example: eu-central
+                      host:
+                        type: string
+                        example: dynamodb.eu-central-1.amazonaws.com
+                      port:
+                        type: integer
+                        enum: [443]
+      responses:
+        '200':
+          description: Connect times keyed by target id
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  data:
+                    type: object
+                    properties:
+                      rtt:
+                        type: object
+                        additionalProperties:
+                          type: integer
+                          nullable: true
+                        example: {eu-central: 23, me-central: null}
+        '400':
+          description: Invalid request (bad target list, port, id, or body over 8 KB)
+        '404':
+          description: Unauthorized, or RTT_ENABLED=0
+        '429':
+          description: More than 6 requests in the current minute
+
   /api/wireguard/start:
     post:
       summary: Start the WireGuard service

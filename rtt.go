@@ -3,9 +3,12 @@ package main
 import (
 	"context"
 	"net"
+	"net/http"
 	"net/netip"
 	"sync"
 	"time"
+
+	"github.com/gin-gonic/gin"
 )
 
 // TCP connect timing for the backend's region probes.
@@ -30,7 +33,16 @@ type rttTarget struct {
 	Port int    `json:"port"`
 }
 
-var rttCGNAT = netip.MustParsePrefix("100.64.0.0/10")
+// Ranges that are never public unicast targets, beyond what netip reports.
+var rttRefusedPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),     // "this network"
+	netip.MustParsePrefix("100.64.0.0/10"), // carrier-grade NAT
+	netip.MustParsePrefix("198.18.0.0/15"), // benchmarking
+	netip.MustParsePrefix("240.0.0.0/4"),   // reserved, incl. broadcast
+	netip.MustParsePrefix("fec0::/10"),     // site-local (deprecated)
+	netip.MustParsePrefix("64:ff9b::/96"),  // NAT64: embeds an IPv4 address
+	netip.MustParsePrefix("2002::/16"),     // 6to4: embeds an IPv4 address
+}
 
 // rttAllowed reports whether addr is a public address this node may connect
 // to. An IPv4-mapped IPv6 address is judged as the IPv4 address inside it.
@@ -43,10 +55,13 @@ func rttAllowed(addr netip.Addr, own []netip.Addr) bool {
 		addr.IsLinkLocalUnicast() ||
 		addr.IsLinkLocalMulticast() ||
 		addr.IsMulticast() ||
-		addr.IsInterfaceLocalMulticast() ||
-		rttCGNAT.Contains(addr) ||
-		addr == netip.AddrFrom4([4]byte{255, 255, 255, 255}) {
+		addr.IsInterfaceLocalMulticast() {
 		return false
+	}
+	for _, p := range rttRefusedPrefixes {
+		if p.Contains(addr) {
+			return false
+		}
 	}
 	for _, o := range own {
 		if o.Unmap() == addr {
@@ -57,10 +72,10 @@ func rttAllowed(addr netip.Addr, own []netip.Addr) bool {
 }
 
 // ownAddrs returns every address of every local interface, unmapped.
-func ownAddrs() []netip.Addr {
+func ownAddrs() ([]netip.Addr, error) {
 	ifaces, err := net.InterfaceAddrs()
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	var out []netip.Addr
 	for _, a := range ifaces {
@@ -75,13 +90,13 @@ func ownAddrs() []netip.Addr {
 			out = append(out, addr.Unmap())
 		}
 	}
-	return out
+	return out, nil
 }
 
 type rttDeps struct {
 	resolve func(ctx context.Context, host string) ([]netip.Addr, error)
 	dial    func(ctx context.Context, addr netip.AddrPort, timeout time.Duration) (time.Duration, error)
-	own     func() []netip.Addr
+	own     func() ([]netip.Addr, error)
 }
 
 func defaultRTTDeps() rttDeps {
@@ -134,7 +149,12 @@ func measureTarget(ctx context.Context, d rttDeps, t rttTarget) *int {
 		return nil
 	}
 	addr, ok := pickAddr(addrs)
-	if !ok || !rttAllowed(addr, d.own()) {
+	if !ok {
+		return nil
+	}
+	// Fail closed: if our own addresses cannot be read, measure nothing.
+	own, err := d.own()
+	if err != nil || !rttAllowed(addr, own) {
 		return nil
 	}
 	target := netip.AddrPortFrom(addr, rttPort)
@@ -204,4 +224,57 @@ func (l *rttLimiter) allow() bool {
 	}
 	l.count++
 	return true
+}
+
+// Seams for the router: tests swap them (newRouter keeps its signature).
+var (
+	rttDepsForRouter = defaultRTTDeps
+	rttClock         = time.Now
+	// rttRequestTimeout is the overall deadline for one request. A var only
+	// so a test can shorten it.
+	rttRequestTimeout = 8 * time.Second
+)
+
+type rttRequest struct {
+	Targets []rttTarget `json:"targets"`
+}
+
+func validRTTTargets(ts []rttTarget) bool {
+	if len(ts) == 0 || len(ts) > rttMaxTargets {
+		return false
+	}
+	seen := make(map[string]bool, len(ts))
+	for _, t := range ts {
+		if t.Port != rttPort || t.Host == "" || t.ID == "" || len(t.ID) > rttMaxIDLen || seen[t.ID] {
+			return false
+		}
+		seen[t.ID] = true
+	}
+	return true
+}
+
+// rttHandlerGin serves POST /api/rtt. Order: switch, limiter, body, validation.
+func rttHandlerGin(d rttDeps, l *rttLimiter) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if getEnv("RTT_ENABLED", "1") == "0" {
+			c.JSON(http.StatusNotFound, APIResponse{})
+			return
+		}
+		if !l.allow() {
+			c.JSON(http.StatusTooManyRequests, APIResponse{})
+			return
+		}
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, rttMaxBodyBytes)
+		var req rttRequest
+		if err := c.ShouldBindJSON(&req); err != nil || !validRTTTargets(req.Targets) {
+			c.JSON(http.StatusBadRequest, APIResponse{Message: "Invalid request payload"})
+			return
+		}
+		ctx, cancel := context.WithTimeout(c.Request.Context(), rttRequestTimeout)
+		defer cancel()
+		c.JSON(http.StatusOK, APIResponse{
+			Success: true,
+			Data:    gin.H{"rtt": measureAll(ctx, d, req.Targets)},
+		})
+	}
 }

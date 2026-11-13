@@ -330,6 +330,7 @@ func newRouter() *gin.Engine {
 	router.POST("/api/start", wireGuardStartHandlerGin)
 	router.POST("/api/stop", wireGuardStopHandlerGin)
 	router.POST("/api/restart", wireGuardRestartHandlerGin)
+	router.POST("/api/rtt", rttHandlerGin(rttDepsForRouter(), newRTTLimiter(rttMaxPerMinute, rttClock)))
 
 	return router
 }

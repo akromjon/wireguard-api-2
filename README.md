@@ -200,6 +200,25 @@ It verifies that the existing token now reaches `awg1` on the existing TCP
 port. If verification fails, the installer restores the previous binary,
 environment, and systemd unit. It does not create a duplicate backend record.
 
+## TCP connect timing (`POST /api/rtt`)
+
+The backend asks this node how long a TCP connect to a few region hosts takes.
+The route needs the usual `key` header.
+
+- Request: `{"targets":[{"id":"eu-central","host":"dynamodb.eu-central-1.amazonaws.com","port":443}]}`.
+- Response: `{"success":true,"data":{"rtt":{"eu-central":23}}}`. The value is the
+  lowest of 3 connects in whole milliseconds (at least 1), or `null` when there
+  is no result.
+- Limits: 1 to 16 targets, unique ids of 1 to 64 characters, port 443 only, body
+  up to 8 KB. Anything else is a 400. Each connect times out after 1 second and
+  one request is cut off after 8 seconds (unfinished targets are `null`).
+- At most 6 requests per minute for the whole route (429 above that).
+- Only public addresses are used. A name that resolves to a private, loopback,
+  link-local, reserved or this node's own address gives `null`, with no
+  connection made. If this node's addresses cannot be read, every target is
+  `null`.
+- `RTT_ENABLED=0` turns the route off: it answers 404, like a wrong key.
+
 ## UDP echo
 
 The API process also answers a tiny UDP echo so phones can measure round-trip
