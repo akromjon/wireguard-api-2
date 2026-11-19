@@ -1080,6 +1080,26 @@ function installQuestions() {
 	fi
 }
 
+# Prints the headers meta packages that match the installed kernel meta
+# packages (linux-image-virtual -> linux-headers-virtual, linux-image-amd64 ->
+# linux-headers-amd64, ...). Installing them next to the running kernel's
+# headers lets DKMS build amneziawg for kernels that unattended-upgrades
+# installs later. Without them the new kernel has no headers, no amneziawg
+# module is built, and awg0 fails to start after the next reboot ("Protocol
+# not supported"). Some provider images (Newfold/Bluehost) ship no headers
+# meta package at all.
+function kernelHeadersMetaPackages() {
+	local image headers
+	dpkg-query -W -f='${db:Status-Abbrev} ${Package}\n' 'linux-image-*' 2>/dev/null |
+		awk '$1=="ii" && $2 !~ /^linux-image-(unsigned-)?[0-9]/ {print $2}' |
+		while read -r image; do
+			headers="linux-headers-${image#linux-image-}"
+			if apt-cache show "${headers}" >/dev/null 2>&1; then
+				echo "${headers}"
+			fi
+		done
+}
+
 function installAmneziaWG() {
 	# Run setup questions first
 	installQuestions
@@ -1101,7 +1121,8 @@ function installAmneziaWG() {
 		add-apt-repository -y ppa:amnezia/ppa
 		apt update
 		# Install DKMS and build tools if not already installed
-		apt install -y dkms build-essential "linux-headers-$(uname -r)"
+		# shellcheck disable=SC2046 # one package name per word, may be empty
+		apt install -y dkms build-essential "linux-headers-$(uname -r)" $(kernelHeadersMetaPackages)
 
 		# Check if packages are available for current Ubuntu version
 		PACKAGES_AVAILABLE=true
@@ -1149,7 +1170,8 @@ function installAmneziaWG() {
 		echo "deb-src https://ppa.launchpadcontent.net/amnezia/ppa/ubuntu focal main" >>/etc/apt/sources.list.d/amneziawg.sources.list
 		apt update
 		# Install DKMS and build tools if not already installed
-		apt install -y dkms build-essential "linux-headers-$(uname -r)"
+		# shellcheck disable=SC2046 # one package name per word, may be empty
+		apt install -y dkms build-essential "linux-headers-$(uname -r)" $(kernelHeadersMetaPackages)
 		# Try to install amneziawg-dkms if available, otherwise fall back to amneziawg
 		if apt-cache show amneziawg-dkms &>/dev/null; then
 			apt install -y amneziawg-dkms amneziawg-tools iptables
