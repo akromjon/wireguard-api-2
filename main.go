@@ -1797,7 +1797,7 @@ func syncWireGuardConf() error {
 	}
 
 	syncCmd := exec.Command(wgCmd, "syncconf", wgParams.ServerWGNIC, "/dev/stdin")
-	syncCmd.Stdin = &stripOutput
+	syncCmd.Stdin = bytes.NewReader(filterHeaderProtectionKey(stripOutput.Bytes()))
 	var syncError bytes.Buffer
 	syncCmd.Stderr = &syncError
 

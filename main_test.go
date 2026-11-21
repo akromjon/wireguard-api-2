@@ -37,9 +37,19 @@ case "$1" in
   genkey) echo "priv$RANDOM$RANDOM$RANDOM" ;;
   pubkey) echo "pub-$(cat)" ;;
   genpsk) echo "psk$RANDOM$RANDOM$RANDOM" ;;
-  strip) exit 0 ;;
+  strip)
+    if [ -f "$dir/strip_output" ]; then cat "$dir/strip_output"; fi
+    exit 0
+    ;;
+  showconf)
+    if [ -f "$dir/showconf_fail" ]; then
+      echo "fake showconf failure" >&2
+      exit 1
+    fi
+    if [ -f "$dir/showconf_output" ]; then cat "$dir/showconf_output"; fi
+    ;;
   syncconf)
-    cat > /dev/null
+    cat > "$dir/last_syncconf_stdin"
     if [ -f "$dir/sync_fail" ]; then
       echo "fake syncconf failure" >&2
       exit 1
@@ -168,6 +178,15 @@ func (e *testEnv) syncconfCalls(t *testing.T) int {
 	}
 
 	return strings.Count(string(content), "syncconf")
+}
+
+func (e *testEnv) lastSyncconfStdin(t *testing.T) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(e.dir, "last_syncconf_stdin"))
+	if err != nil {
+		t.Fatalf("reading last syncconf stdin: %v", err)
+	}
+	return string(data)
 }
 
 func (e *testEnv) configContent(t *testing.T) string {
