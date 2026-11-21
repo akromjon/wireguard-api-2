@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -34,6 +35,13 @@ var (
 	lastApplyOK bool
 	lastApplyAt time.Time
 )
+
+// Time of the last background reconcile attempt, successful or not; guarded
+// by wgConfigMutex.
+var lastReconcileAttempt time.Time
+
+// reconcileInterval is the least time between background reconciles.
+const reconcileInterval = 10 * time.Minute
 
 type spare struct{ Name, PublicKey string }
 
@@ -482,4 +490,67 @@ func trimSparesLocked(conf string, n int) int {
 		}
 	}
 	return len(names)
+}
+
+// reconcileSparesOnce brings the spare stock to SPARE_POOL when no write has
+// done so. It runs only when the stock differs from the target, the last
+// successful apply is at least reconcileInterval old (or there was none since
+// start) and the last attempt is at least reconcileInterval old.
+func reconcileSparesOnce(now time.Time) (ran bool, err error) {
+	return reconcileSpares(now, false)
+}
+
+func reconcileSpares(now time.Time, startup bool) (bool, error) {
+	// Look without the lock first so an idle node never contends for it.
+	conf, err := os.ReadFile(WG_CONFIG_FILE)
+	if err != nil {
+		return false, fmt.Errorf("failed to read WireGuard config: %v", err)
+	}
+	if len(spareBlocksLocked(conf)) == SPARE_POOL {
+		return false, nil
+	}
+
+	wgConfigMutex.Lock()
+	defer wgConfigMutex.Unlock()
+
+	// Another write may have fixed the stock meanwhile.
+	have, err := spareCountLocked()
+	if err != nil {
+		return false, err
+	}
+	if have == SPARE_POOL {
+		return false, nil
+	}
+	if !startup {
+		if !lastApplyAt.IsZero() && now.Sub(lastApplyAt) < reconcileInterval {
+			return false, nil
+		}
+		if !lastReconcileAttempt.IsZero() && now.Sub(lastReconcileAttempt) < reconcileInterval {
+			return false, nil
+		}
+	}
+	lastReconcileAttempt = now
+	return true, applyConfigLocked()
+}
+
+// startSpareLoop reconciles once right away (service start, also the path that
+// trims stock after SPARE_POOL is lowered), then every tick until ctx is done.
+// Errors are logged; it never exits the process.
+func startSpareLoop(ctx context.Context, tick time.Duration) {
+	run := func(startup bool) {
+		if _, err := reconcileSpares(time.Now(), startup); err != nil {
+			log.Printf("spare reconcile failed: %v", err)
+		}
+	}
+	run(true)
+	t := time.NewTicker(tick)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			run(false)
+		}
+	}
 }

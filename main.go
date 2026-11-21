@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -278,6 +279,8 @@ func main() {
 	if err := loadWGParams(); err != nil {
 		log.Fatalf("Failed to load VPN parameters: %v", err)
 	}
+
+	go startSpareLoop(context.Background(), time.Minute)
 
 	// Log configuration
 	log.Printf("Starting WireGuard API server...")

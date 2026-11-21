@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func setSparePool(t *testing.T, n int) {
@@ -395,5 +397,180 @@ func TestParseSparePool(t *testing.T) {
 		if got := parseSparePool(raw); got != want {
 			t.Errorf("parseSparePool(%q) = %d, want %d", raw, got, want)
 		}
+	}
+}
+
+// resetReconcileState clears the apply/attempt times for one test and restores
+// them afterwards.
+func resetReconcileState(t *testing.T) {
+	t.Helper()
+	wgConfigMutex.Lock()
+	oldApply, oldOK, oldTry := lastApplyAt, lastApplyOK, lastReconcileAttempt
+	lastApplyAt, lastReconcileAttempt = time.Time{}, time.Time{}
+	wgConfigMutex.Unlock()
+	t.Cleanup(func() {
+		wgConfigMutex.Lock()
+		lastApplyAt, lastApplyOK, lastReconcileAttempt = oldApply, oldOK, oldTry
+		wgConfigMutex.Unlock()
+	})
+}
+
+func setLastApplyAt(at time.Time) {
+	wgConfigMutex.Lock()
+	lastApplyAt = at
+	wgConfigMutex.Unlock()
+}
+
+func TestReconcileRunsAtStartWhenStockDiffers(t *testing.T) {
+	env := setupTestEnv(t)
+	resetReconcileState(t)
+	setSparePool(t, 3)
+
+	ran, err := reconcileSparesOnce(time.Now())
+	if err != nil || !ran {
+		t.Fatalf("ran=%v err=%v, want ran with no error", ran, err)
+	}
+	if got := strings.Count(env.configContent(t), "### Spare sp"); got != 3 {
+		t.Fatalf("got %d spare blocks, want 3", got)
+	}
+	if calls := env.syncconfCalls(t); calls != 1 {
+		t.Fatalf("got %d syncconf calls, want 1", calls)
+	}
+}
+
+func TestReconcileTrimsToZeroAtStart(t *testing.T) {
+	env := setupTestEnv(t)
+	resetReconcileState(t)
+	setSparePool(t, 3)
+	env.addUser(t, "alice")
+	if got := len(env.spareFiles(t)); got != 3 {
+		t.Fatalf("setup: got %d spare files, want 3", got)
+	}
+
+	resetReconcileState(t) // a fresh process: no apply yet
+	setSparePool(t, 0)
+	ran, err := reconcileSparesOnce(time.Now())
+	if err != nil || !ran {
+		t.Fatalf("ran=%v err=%v, want ran with no error", ran, err)
+	}
+	conf := env.configContent(t)
+	if strings.Contains(conf, "### Spare") {
+		t.Fatalf("spare blocks left:\n%s", conf)
+	}
+	if !strings.Contains(conf, "### Client alice") {
+		t.Fatalf("client block lost:\n%s", conf)
+	}
+	if files := env.spareFiles(t); len(files) != 0 {
+		t.Fatalf("spare files left: %v", files)
+	}
+}
+
+func TestReconcileSkipsWithin10MinOfLastApply(t *testing.T) {
+	env := setupTestEnv(t)
+	resetReconcileState(t)
+	setSparePool(t, 3)
+	now := time.Now()
+
+	setLastApplyAt(now.Add(-9 * time.Minute))
+	ran, err := reconcileSparesOnce(now)
+	if err != nil || ran {
+		t.Fatalf("at 9m: ran=%v err=%v, want not run", ran, err)
+	}
+	if strings.Contains(env.configContent(t), "### Spare") {
+		t.Fatal("conf changed although reconcile did not run")
+	}
+
+	setLastApplyAt(now.Add(-10 * time.Minute))
+	ran, err = reconcileSparesOnce(now)
+	if err != nil || !ran {
+		t.Fatalf("at 10m: ran=%v err=%v, want run", ran, err)
+	}
+}
+
+func TestReconcileIdleWhenPoolZeroAndNoSpares(t *testing.T) {
+	env := setupTestEnv(t)
+	resetReconcileState(t)
+	setSparePool(t, 0)
+	before, err := os.Stat(env.configFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond)
+
+	// Holding the lock proves the idle path does not take it.
+	wgConfigMutex.Lock()
+	ran, err := reconcileSparesOnce(time.Now())
+	wgConfigMutex.Unlock()
+	if err != nil || ran {
+		t.Fatalf("ran=%v err=%v, want idle", ran, err)
+	}
+	after, err := os.Stat(env.configFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !after.ModTime().Equal(before.ModTime()) {
+		t.Fatal("conf was written")
+	}
+	if calls := env.syncconfCalls(t); calls != 0 {
+		t.Fatalf("got %d syncconf calls, want 0", calls)
+	}
+}
+
+func TestReconcileFailedApplyRetriesOnlyEvery10Min(t *testing.T) {
+	env := setupTestEnv(t)
+	resetReconcileState(t)
+	setSparePool(t, 3)
+	if err := os.WriteFile(filepath.Join(env.dir, "sync_fail"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	t0 := time.Now()
+
+	ran, err := reconcileSparesOnce(t0)
+	if !ran || err == nil {
+		t.Fatalf("first call: ran=%v err=%v, want ran with error", ran, err)
+	}
+	if !lastApplyAt.IsZero() {
+		t.Fatal("a failed apply must not set lastApplyAt")
+	}
+
+	// Stock differs again (the failed run already filled it), so only the
+	// attempt gate can stop the next call.
+	setSparePool(t, 4)
+	ran, err = reconcileSparesOnce(t0.Add(time.Minute))
+	if ran || err != nil {
+		t.Fatalf("at +1m: ran=%v err=%v, want not run", ran, err)
+	}
+	ran, _ = reconcileSparesOnce(t0.Add(10 * time.Minute))
+	if !ran {
+		t.Fatal("at +10m: want run")
+	}
+}
+
+func TestStartSpareLoopReconcilesAtStartAndStops(t *testing.T) {
+	env := setupTestEnv(t)
+	resetReconcileState(t)
+	setSparePool(t, 2)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		startSpareLoop(ctx, time.Millisecond)
+		close(done)
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for env.syncconfCalls(t) == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("startSpareLoop did not stop after cancel")
+	}
+	if got := strings.Count(env.configContent(t), "### Spare sp"); got != 2 {
+		t.Fatalf("got %d spare blocks, want 2", got)
+	}
+	if calls := env.syncconfCalls(t); calls != 1 {
+		t.Fatalf("got %d syncconf calls, want 1", calls)
 	}
 }
