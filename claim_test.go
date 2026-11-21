@@ -269,3 +269,80 @@ func TestClaimValidation(t *testing.T) {
 		t.Fatalf("syncconf ran for rejected requests")
 	}
 }
+
+func TestClaimLeftoverApplyFailsAndNothingSucceededAnswers500(t *testing.T) {
+	env := setupTestEnv(t)
+	setSparePool(t, 0)
+	env.addUser(t, "seed") // successful apply: lastApplyOK is true
+	if err := os.WriteFile(filepath.Join(env.dir, "sync_fail"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	code, resp := env.claim(t, "d1")
+	if code != http.StatusInternalServerError || resp.Success {
+		t.Fatalf("status %d, %+v", code, resp)
+	}
+	if resp.Data.Failed != 1 || resp.Data.Created != 0 || resp.Data.Claimed != 0 {
+		t.Fatalf("bad counts: %+v", resp.Data)
+	}
+	if strings.Contains(resp.Message, "before claiming") || !strings.Contains(resp.Message, "created 1 clients but failed to apply config") {
+		t.Fatalf("wrong 500 reason: %q", resp.Message)
+	}
+	if r := resp.Data.Results[0]; r.Success || r.Status != "error" {
+		t.Fatalf("result %+v", r)
+	}
+}
+
+func TestClaimedConfigUsesCurrentSettings(t *testing.T) {
+	env := setupTestEnv(t)
+	setSparePool(t, 2)
+	env.addUser(t, "seed")
+
+	before := env.configContent(t)
+	spare := spareBlocksLocked([]byte(before))[0]
+	calls := env.syncconfCalls(t)
+
+	oldPort := wgParams.ServerPort
+	wgParams.ServerPort = "60999"
+	t.Cleanup(func() { wgParams.ServerPort = oldPort })
+
+	code, resp := env.claim(t, "f1")
+	if code != http.StatusOK || resp.Data.Claimed != 1 {
+		t.Fatalf("status %d, %+v", code, resp)
+	}
+	r := resp.Data.Results[0]
+	file, err := os.ReadFile(filepath.Join(env.clientsDir, "wg0-client-f1.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for label, text := range map[string]string{"response": r.Config, "file": string(file)} {
+		if !strings.Contains(text, ":60999\n") || strings.Contains(text, ":"+oldPort+"\n") {
+			t.Errorf("%s config has a stale endpoint:\n%s", label, text)
+		}
+		if !strings.Contains(text, "Address = "+r.IPV4+"/32") {
+			t.Errorf("%s config lost the spare address", label)
+		}
+	}
+	if r.Config != string(file) {
+		t.Errorf("response and client file differ")
+	}
+
+	after := env.configContent(t)
+	want := fmt.Sprintf("### Client f1\n[Peer]\nPublicKey = %s\n", spare.PublicKey)
+	if !strings.Contains(after, want) {
+		t.Fatalf("peer block of f1 is not the former spare")
+	}
+	if strings.Join(peerKeyLines(after), "|") != strings.Join(peerKeyLines(before), "|") ||
+		strings.Count(after, "PresharedKey = ") != strings.Count(before, "PresharedKey = ") ||
+		strings.Count(after, "AllowedIPs = ") != strings.Count(before, "AllowedIPs = ") {
+		t.Fatalf("peer key material or addresses changed")
+	}
+	for _, l := range strings.Split(before, "\n") {
+		if (strings.HasPrefix(l, "PresharedKey = ") || strings.HasPrefix(l, "AllowedIPs = ")) && !strings.Contains(after, l+"\n") {
+			t.Errorf("line %q vanished from the conf", l)
+		}
+	}
+	if got := env.syncconfCalls(t); got != calls {
+		t.Fatalf("claim ran syncconf")
+	}
+}

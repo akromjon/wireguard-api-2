@@ -727,40 +727,9 @@ func addUsersBulkHandlerGin(c *gin.Context) {
 		return
 	}
 
-	if len(req.Names) == 0 {
-		c.JSON(http.StatusBadRequest, APIResponse{
-			Success: false,
-			Message: "names must contain at least one client name",
-		})
+	if msg := validateBulkNames(req.Names); msg != "" {
+		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Message: msg})
 		return
-	}
-	if len(req.Names) > maxBulkUsers {
-		c.JSON(http.StatusBadRequest, APIResponse{
-			Success: false,
-			Message: fmt.Sprintf("names must not contain more than %d client names", maxBulkUsers),
-		})
-		return
-	}
-
-	// Reject the whole request on any bad or duplicate name before touching
-	// the config, so a validation bug can't half-apply a batch.
-	seen := make(map[string]bool, len(req.Names))
-	for _, name := range req.Names {
-		if !clientNameRegex.MatchString(name) {
-			c.JSON(http.StatusBadRequest, APIResponse{
-				Success: false,
-				Message: fmt.Sprintf("invalid client name %q: must contain only alphanumeric characters, underscores, or dashes and be less than 16 characters", name),
-			})
-			return
-		}
-		if seen[name] {
-			c.JSON(http.StatusBadRequest, APIResponse{
-				Success: false,
-				Message: fmt.Sprintf("duplicate client name %q in request", name),
-			})
-			return
-		}
-		seen[name] = true
 	}
 
 	// Key generation shells out to wg but reads no shared state, so do all of

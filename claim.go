@@ -83,37 +83,9 @@ func claimUsersHandlerGin(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Message: "Invalid request payload"})
 		return
 	}
-	if len(req.Names) == 0 {
-		c.JSON(http.StatusBadRequest, APIResponse{
-			Success: false,
-			Message: "names must contain at least one client name",
-		})
+	if msg := validateBulkNames(req.Names); msg != "" {
+		c.JSON(http.StatusBadRequest, APIResponse{Success: false, Message: msg})
 		return
-	}
-	if len(req.Names) > maxBulkUsers {
-		c.JSON(http.StatusBadRequest, APIResponse{
-			Success: false,
-			Message: fmt.Sprintf("names must not contain more than %d client names", maxBulkUsers),
-		})
-		return
-	}
-	seen := make(map[string]bool, len(req.Names))
-	for _, name := range req.Names {
-		if !clientNameRegex.MatchString(name) {
-			c.JSON(http.StatusBadRequest, APIResponse{
-				Success: false,
-				Message: fmt.Sprintf("invalid client name %q: %s", name, invalidClientNameMessage),
-			})
-			return
-		}
-		if seen[name] {
-			c.JSON(http.StatusBadRequest, APIResponse{
-				Success: false,
-				Message: fmt.Sprintf("duplicate client name %q in request", name),
-			})
-			return
-		}
-		seen[name] = true
 	}
 
 	results, status, errMsg := claimLocked(req.Names)
@@ -178,16 +150,20 @@ func claimLocked(names []string) ([]ClaimResult, int, string) {
 	}
 
 	results := make([]ClaimResult, len(names))
-	type move struct{ from, to string }
+	type move struct {
+		from, to string
+		old      []byte
+	}
 	var moves []move
 	var leftovers []int // indexes into names
 	relabelled := false
 
 	rollback := func() {
 		for _, m := range moves {
-			if err := os.Rename(m.to, m.from); err != nil {
+			if err := os.WriteFile(m.from, m.old, 0600); err != nil {
 				log.Printf("claim: rollback of a client file move failed: %v", err)
 			}
+			os.Remove(m.to)
 		}
 	}
 
@@ -215,18 +191,36 @@ func claimLocked(names []string) ([]ClaimResult, int, string) {
 			spareIdx = spareIdx[1:]
 			spareName := strings.TrimPrefix(strings.TrimRight(blockMarker(blocks[idx]), "\r"), spareMarker)
 			from, to := sparePath(spareName), clientFilePath(name)
-			cfgBytes, err := os.ReadFile(from)
+			oldBytes, err := os.ReadFile(from)
 			if err != nil {
 				// A spare without its file cannot be handed out; leave it.
 				log.Printf("claim: skipping a spare whose client file cannot be read: %v", err)
 				continue
 			}
-			if err := os.Rename(from, to); err != nil {
-				log.Printf("claim: skipping a spare whose client file cannot be moved: %v", err)
+			// Rebuild the client text from the current settings, so a claimed
+			// config is as fresh as a created one. The key material is the
+			// spare's own.
+			keys := clientKeys{
+				privateKey:   interfacePrivateKey(string(oldBytes)),
+				publicKey:    blockValue(blocks[idx], "PublicKey"),
+				preSharedKey: blockValue(blocks[idx], "PresharedKey"),
+			}
+			if keys.privateKey == "" || keys.publicKey == "" || keys.preSharedKey == "" {
+				log.Printf("claim: skipping a spare with incomplete key material")
 				continue
 			}
-			moves = append(moves, move{from: from, to: to})
 			ipv4, ipv6 := blockAddresses(blocks[idx])
+			cfgBytes := []byte(buildClientConfigText(ipv4, ipv6, keys))
+			if err := os.WriteFile(to, cfgBytes, 0600); err != nil {
+				log.Printf("claim: skipping a spare whose client file cannot be written: %v", err)
+				continue
+			}
+			if err := os.Remove(from); err != nil {
+				os.Remove(to)
+				log.Printf("claim: skipping a spare whose client file cannot be removed: %v", err)
+				continue
+			}
+			moves = append(moves, move{from: from, to: to, old: oldBytes})
 			blocks[idx] = strings.Replace(blocks[idx], spareMarker+spareName, clientMarker+name, 1)
 			relabelled = true
 			claimed = true
@@ -301,4 +295,20 @@ func claimLocked(names []string) ([]ClaimResult, int, string) {
 	}
 
 	return results, http.StatusOK, ""
+}
+
+// blockValue returns the value of the first "<key> = value" line of a block.
+func blockValue(block, key string) string {
+	for _, line := range strings.Split(block, "\n") {
+		k, v, ok := strings.Cut(strings.TrimRight(line, "\r"), "=")
+		if ok && strings.TrimSpace(k) == key {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
+// interfacePrivateKey returns the PrivateKey line of a client config.
+func interfacePrivateKey(conf string) string {
+	return blockValue(conf, "PrivateKey")
 }
