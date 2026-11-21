@@ -178,3 +178,27 @@ func TestNativeKeysAreValidX25519(t *testing.T) {
 		t.Fatal("two calls returned overlapping key material")
 	}
 }
+
+// Private keys come out clamped, byte for byte like `wg genkey`.
+func TestNativePrivateKeysAreClamped(t *testing.T) {
+	for i := 0; i < 64; i++ {
+		k, err := generateClientKeysNative()
+		if err != nil {
+			t.Fatal(err)
+		}
+		priv, err := base64.StdEncoding.DecodeString(k.privateKey)
+		if err != nil || len(priv) != 32 {
+			t.Fatalf("private key must be 32 base64 bytes, got len %d err %v", len(priv), err)
+		}
+		if priv[0]&7 != 0 || priv[31]&128 != 0 || priv[31]&64 == 0 {
+			t.Fatalf("private key %d is not clamped: first byte %08b, last byte %08b", i, priv[0], priv[31])
+		}
+		key, err := ecdh.X25519().NewPrivateKey(priv)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := base64.StdEncoding.EncodeToString(key.PublicKey().Bytes()); got != k.publicKey {
+			t.Fatal("public key does not match the clamped private key")
+		}
+	}
+}

@@ -111,9 +111,17 @@ func (a *ipAllocator) next() (ipv4, ipv6 string, err error) {
 
 // generateClientKeysNative produces the same key material as
 // generateClientKeys without spawning wg/awg: X25519 private/public pair and a
-// 32-byte pre-shared key, all base64 (std encoding).
+// 32-byte pre-shared key, all base64 (std encoding). The private key is clamped
+// like `wg genkey` does, so the stored bytes match what the tools would write.
 func generateClientKeysNative() (clientKeys, error) {
-	priv, err := ecdh.X25519().GenerateKey(rand.Reader)
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return clientKeys{}, fmt.Errorf("failed to generate private key: %v", err)
+	}
+	raw[0] &= 248
+	raw[31] &= 127
+	raw[31] |= 64
+	priv, err := ecdh.X25519().NewPrivateKey(raw)
 	if err != nil {
 		return clientKeys{}, fmt.Errorf("failed to generate private key: %v", err)
 	}
