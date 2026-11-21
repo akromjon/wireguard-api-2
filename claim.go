@@ -33,6 +33,41 @@ func clientFilePath(name string) string {
 	return filepath.Join(WIREGUARD_CLIENTS, wgParams.ServerWGNIC+"-client-"+name+".conf")
 }
 
+// clientNameForms lists the "### Client" names that belong to a client name,
+// in the order clientExists and removeClientFromConfig try them.
+func clientNameForms(name string) []string {
+	return []string{name, "wg0-client-" + name, "awg0-client-" + name, wgParams.ServerWGNIC + "-client-" + name}
+}
+
+// clientMarkerNames returns the name of every "### Client" line of a config,
+// taken whole like clientExists matches it (nothing trimmed), so a request can
+// check many names against one read of the config.
+func clientMarkerNames(conf string) map[string]bool {
+	names := make(map[string]bool)
+	for _, line := range strings.Split(conf, "\n") {
+		if strings.HasPrefix(line, clientMarker) {
+			names[strings.TrimPrefix(line, clientMarker)] = true
+		}
+	}
+	return names
+}
+
+// clientTaken answers what clientExists answers for name, using the marker
+// names of one config read instead of re-reading and scanning the config.
+func clientTaken(markers map[string]bool, name string) bool {
+	for _, form := range clientNameForms(name) {
+		if markers[form] {
+			return true
+		}
+	}
+	for _, p := range clientFileVariants(name) {
+		if fileExists(p) {
+			return true
+		}
+	}
+	return false
+}
+
 // existingClientConfig reads the client file of a name clientExists reported
 // as taken, trying the same file name patterns clientExists checks.
 func existingClientConfig(name string) (string, error) {
@@ -138,6 +173,9 @@ func claimLocked(names []string) ([]ClaimResult, int, string) {
 		return nil, http.StatusInternalServerError, fmt.Sprintf("failed to read WireGuard config: %v", err)
 	}
 	header, blocks := splitBlocks(string(confBytes))
+	// Read once: the loop below changes client files but not the conf on
+	// disk, so this is what clientExists would see for every name.
+	markers := clientMarkerNames(string(confBytes))
 	var spareIdx []int // indexes into blocks, file order
 	for i, b := range blocks {
 		if strings.HasPrefix(blockMarker(b), spareMarker) {
@@ -168,14 +206,7 @@ func claimLocked(names []string) ([]ClaimResult, int, string) {
 	}
 
 	for i, name := range names {
-		exists, err := clientExists(name)
-		if err != nil {
-			for j := i; j < len(names); j++ {
-				results[j] = ClaimResult{Name: names[j], Status: claimStatusError, Message: err.Error()}
-			}
-			break
-		}
-		if exists {
+		if clientTaken(markers, name) {
 			cfg, err := existingClientConfig(name)
 			if err != nil {
 				results[i] = ClaimResult{Name: name, Status: claimStatusError, Message: err.Error()}
