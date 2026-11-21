@@ -205,6 +205,88 @@ paths:
         '500':
           description: Applying the configuration failed (data reports what was created), or no clients could be created at all (created=0)
 
+  /api/users/claim:
+    post:
+      summary: Claim client configs, served from the spare stock when possible
+      description: >
+        Returns a client config for each of up to 500 names. A name that
+        already exists returns its stored config (status existing), so a
+        retry is safe. Other names take a pre-loaded spare peer from the stock
+        (status claimed): only a comment line in the server config changes, so
+        no syncconf runs. When the stock runs out, the remaining names are
+        created like add-bulk does (status created) with one config apply,
+        which also refills the stock. If the last config apply failed (or none
+        ran since start), the server applies first and answers 500 when that
+        apply fails, without handing anything out. Invalid or duplicate names
+        reject the whole request before anything is touched.
+      operationId: claimUsers
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - names
+              properties:
+                names:
+                  type: array
+                  minItems: 1
+                  maxItems: 500
+                  items:
+                    type: string
+                    pattern: '^[a-zA-Z0-9_-]{1,15}$'
+      responses:
+        '200':
+          description: The request was processed; individual names may still have failed (status error) — check data.results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  message:
+                    type: string
+                  data:
+                    type: object
+                    properties:
+                      claimed:
+                        type: integer
+                      created:
+                        type: integer
+                      existing:
+                        type: integer
+                      failed:
+                        type: integer
+                      results:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            name:
+                              type: string
+                            success:
+                              type: boolean
+                            status:
+                              type: string
+                              enum: [claimed, created, existing, error]
+                            message:
+                              type: string
+                            ipv4:
+                              type: string
+                            ipv6:
+                              type: string
+                            config:
+                              type: string
+        '400':
+          description: Invalid request (no names, too many names, invalid or duplicate name)
+        '404':
+          description: Missing or invalid API token (the auth middleware masks failures as 404), or the endpoint does not exist on an older binary — callers cannot distinguish the two by status
+        '500':
+          description: The config apply before serving failed, the server config could not be updated, or the apply for newly created clients failed while nothing else succeeded
+
   /api/users/delete:
     post:
       summary: Delete a WireGuard client
