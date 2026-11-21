@@ -322,6 +322,7 @@ func newRouter() *gin.Engine {
 	router.POST("/api/users/add", addUserHandlerGin)
 	router.POST("/api/users/add-bulk", addUsersBulkHandlerGin)
 	router.POST("/api/users/claim", claimUsersHandlerGin)
+	router.POST("/api/users/delete-bulk", deleteUsersBulkHandlerGin)
 	router.POST("/api/users/delete", deleteUserHandlerGin)
 	router.POST("/api/users/delete-all", deleteAllUsersHandlerGin)
 

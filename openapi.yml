@@ -287,6 +287,78 @@ paths:
         '500':
           description: The config apply before serving failed, the server config could not be updated, or the apply for newly created clients failed while nothing else succeeded
 
+  /api/users/delete-bulk:
+    post:
+      summary: Delete many clients with one config apply
+      description: >
+        Removes up to 500 clients in one request: one config write and one
+        apply (which also refills the spare stock). A name with neither a
+        config block nor a client file is not_found, so a retry is safe.
+        Spare peers are never matched by name. If the apply fails, the
+        server answers 500 and reports no name as deleted (status error); the
+        blocks are already out of the config file, so a retry reports
+        not_found and the next successful apply removes the peers. Invalid or
+        duplicate names reject the whole request before anything is touched.
+      operationId: deleteUsersBulk
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - names
+              properties:
+                names:
+                  type: array
+                  minItems: 1
+                  maxItems: 500
+                  items:
+                    type: string
+                    pattern: '^[a-zA-Z0-9_-]{1,15}$'
+      responses:
+        '200':
+          description: The apply succeeded; individual names may still have failed (status error) — check data.results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  message:
+                    type: string
+                  data:
+                    type: object
+                    properties:
+                      deleted:
+                        type: integer
+                      not_found:
+                        type: integer
+                      failed:
+                        type: integer
+                      results:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            name:
+                              type: string
+                            success:
+                              type: boolean
+                            status:
+                              type: string
+                              enum: [deleted, not_found, error]
+                            message:
+                              type: string
+        '400':
+          description: Invalid request (no names, too many names, invalid or duplicate name)
+        '404':
+          description: Missing or invalid API token (the auth middleware masks failures as 404), or the endpoint does not exist on an older binary — callers cannot distinguish the two by status
+        '500':
+          description: The config could not be read or written, or the apply failed (data reports every name that would have been deleted as error)
+
   /api/users/delete:
     post:
       summary: Delete a WireGuard client
