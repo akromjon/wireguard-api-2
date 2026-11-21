@@ -33,6 +33,7 @@ case "$1" in
       echo "fake show failure" >&2
       exit 1
     fi
+    if [ -f "$dir/show_output" ]; then cat "$dir/show_output"; fi
     ;;
   genkey) echo "priv$RANDOM$RANDOM$RANDOM" ;;
   pubkey) echo "pub-$(cat)" ;;

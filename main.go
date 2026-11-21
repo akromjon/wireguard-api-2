@@ -259,6 +259,7 @@ func loadEnv() {
 		paramsFileExplicit = false
 	}
 	DEBUG_MODE = getEnv("DEBUG_MODE", "false") == "true"
+	SPARE_POOL = parseSparePool(getEnv("SPARE_POOL", "0"))
 	USE_UDP_443_ENDPOINT = strings.EqualFold(getEnv("USE_UDP_443_ENDPOINT", "false"), "true")
 	AWG_PROFILE = strings.ToLower(getEnv("AWG_PROFILE", "awg2"))
 
@@ -820,7 +821,7 @@ func addUsersBulkHandlerGin(c *gin.Context) {
 		// Sync even when nothing new was created: it re-applies any peer a
 		// previously failed batch appended without applying, so a retry
 		// self-heals instead of leaving unapplied peers in the file forever.
-		return syncWireGuardConf()
+		return applyConfigLocked()
 	}()
 
 	data := gin.H{
@@ -969,7 +970,7 @@ func deleteAllUsersHandlerGin(c *gin.Context) {
 	}
 
 	// Step 4: Sync changes with WireGuard to disconnect clients
-	syncErr := syncWireGuardConf()
+	syncErr := applyConfigLocked()
 	if syncErr != nil {
 		c.JSON(http.StatusInternalServerError, APIResponse{
 			Success: false,
@@ -1042,19 +1043,12 @@ func removeAllClientsFromConfig() error {
 		return fmt.Errorf("failed to read WireGuard config: %v", err)
 	}
 
-	// Find the server configuration (everything before the first client)
-	clientMarkerIndex := strings.Index(string(content), "### Client ")
-	if clientMarkerIndex == -1 {
+	// Drop every client block but keep the server section and any spare
+	// blocks.
+	serverConfig, found := removeClientBlocksKeepSpares(string(content))
+	if !found {
 		// No clients found, nothing to remove
 		return nil
-	}
-
-	// Extract server config (everything before the first client marker)
-	serverConfig := string(content[:clientMarkerIndex])
-
-	// Make sure the config ends with a newline
-	if !strings.HasSuffix(serverConfig, "\n") {
-		serverConfig += "\n"
 	}
 
 	// Write the updated config back to the file
@@ -1439,7 +1433,7 @@ func addWireGuardClient(name, ipv4, ipv6 string) (string, string, string, error)
 		return "", "", "", err
 	}
 
-	if err := syncWireGuardConf(); err != nil {
+	if err := applyConfigLocked(); err != nil {
 		return "", "", "", fmt.Errorf("failed to sync WireGuard config: %v", err)
 	}
 
@@ -1467,135 +1461,7 @@ func createWireGuardClientLocked(name, ipv4, ipv6 string, keys clientKeys) (stri
 		return "", fmt.Errorf("at least one IP address (IPv4 or IPv6) must be provided")
 	}
 
-	// Create client configuration
-	endpoint := wgParams.ServerPubIP
-
-	// If IPv6, add brackets if missing
-	if strings.Contains(endpoint, ":") && !strings.Contains(endpoint, "[") {
-		endpoint = "[" + endpoint + "]"
-	}
-
-	endpointPort := wgParams.ServerPort
-	if USE_UDP_443_ENDPOINT {
-		endpointPort = "443"
-	}
-	endpoint = endpoint + ":" + endpointPort
-
-	// Format Address line based on provided IP addresses
-	var addressParts []string
-	if ipv4 != "" {
-		addressParts = append(addressParts, ipv4+"/32")
-	}
-	if ipv6 != "" {
-		addressParts = append(addressParts, ipv6+"/128")
-	}
-	addressLine := fmt.Sprintf("Address = %s", strings.Join(addressParts, ","))
-
-	// Build client config - include AmneziaWG parameters if backend is AmneziaWG.
-	// The marker is a comment so legacy parsers continue to accept the config,
-	// while clients that support profile selection can identify AWG2 explicitly.
-	var interfaceLines []string
-	if isModernProfile() {
-		interfaceLines = append(interfaceLines, awg2ConfigMarker)
-	}
-	interfaceLines = append(interfaceLines, fmt.Sprintf("PrivateKey = %s", keys.privateKey))
-	interfaceLines = append(interfaceLines, addressLine)
-	interfaceLines = append(interfaceLines, fmt.Sprintf("DNS = %s,%s", wgParams.ClientDNS1, wgParams.ClientDNS2))
-
-	// Add AmneziaWG specific parameters if backend is AmneziaWG
-	if backendType == "amneziawg" {
-		if wgParams.ServerAWGJC != "" {
-			interfaceLines = append(interfaceLines, fmt.Sprintf("Jc = %s", wgParams.ServerAWGJC))
-		}
-		if wgParams.ServerAWGJMin != "" {
-			interfaceLines = append(interfaceLines, fmt.Sprintf("Jmin = %s", wgParams.ServerAWGJMin))
-		}
-		if wgParams.ServerAWGJMax != "" {
-			interfaceLines = append(interfaceLines, fmt.Sprintf("Jmax = %s", wgParams.ServerAWGJMax))
-		}
-		if wgParams.ServerAWGS1 != "" {
-			interfaceLines = append(interfaceLines, fmt.Sprintf("S1 = %s", wgParams.ServerAWGS1))
-		}
-		if wgParams.ServerAWGS2 != "" {
-			interfaceLines = append(interfaceLines, fmt.Sprintf("S2 = %s", wgParams.ServerAWGS2))
-		}
-		if isModernProfile() {
-			if wgParams.ServerAWGS3 != "" {
-				interfaceLines = append(interfaceLines, fmt.Sprintf("S3 = %s", wgParams.ServerAWGS3))
-			}
-			if wgParams.ServerAWGS4 != "" {
-				interfaceLines = append(interfaceLines, fmt.Sprintf("S4 = %s", wgParams.ServerAWGS4))
-			}
-		}
-		if wgParams.ServerAWGH1 != "" {
-			interfaceLines = append(interfaceLines, fmt.Sprintf("H1 = %s", wgParams.ServerAWGH1))
-		}
-		if wgParams.ServerAWGH2 != "" {
-			interfaceLines = append(interfaceLines, fmt.Sprintf("H2 = %s", wgParams.ServerAWGH2))
-		}
-		if wgParams.ServerAWGH3 != "" {
-			interfaceLines = append(interfaceLines, fmt.Sprintf("H3 = %s", wgParams.ServerAWGH3))
-		}
-		if wgParams.ServerAWGH4 != "" {
-			interfaceLines = append(interfaceLines, fmt.Sprintf("H4 = %s", wgParams.ServerAWGH4))
-		}
-		if isModernProfile() {
-			for _, field := range []struct {
-				name  string
-				value string
-			}{
-				{name: "I1", value: wgParams.ServerAWGI1},
-				{name: "I2", value: wgParams.ServerAWGI2},
-				{name: "I3", value: wgParams.ServerAWGI3},
-				{name: "I4", value: wgParams.ServerAWGI4},
-				{name: "I5", value: wgParams.ServerAWGI5},
-			} {
-				// Empty I fields are omitted deliberately. This is valid for
-				// optional signatures and avoids old tools parsing an empty value.
-				if field.value != "" {
-					interfaceLines = append(interfaceLines, fmt.Sprintf("%s = %s", field.name, field.value))
-				}
-			}
-		}
-
-		if isAWG3Profile() {
-			if wgParams.ServerAWGHeaderProtectionKey != "" {
-				interfaceLines = append(interfaceLines,
-					fmt.Sprintf("HeaderProtectionKey = %s", wgParams.ServerAWGHeaderProtectionKey))
-			}
-			for _, field := range []struct {
-				name  string
-				value string
-			}{
-				{name: "ContentPaddingAddition", value: wgParams.ServerAWGContentPaddingAddition},
-				{name: "RekeyAfterTime", value: wgParams.ServerAWGRekeyAfterTime},
-				{name: "RekeyTimeout", value: wgParams.ServerAWGRekeyTimeout},
-				{name: "RejectAfterTime", value: wgParams.ServerAWGRejectAfterTime},
-				{name: "KeepaliveTimeout", value: wgParams.ServerAWGKeepaliveTimeout},
-				{name: "MaxHandshakeAttempts", value: wgParams.ServerAWGMaxHandshakeAttempts},
-			} {
-				// Unset timing ranges are omitted so the client falls back to
-				// its own defaults instead of parsing an empty value.
-				if field.value != "" {
-					interfaceLines = append(interfaceLines, fmt.Sprintf("%s = %s", field.name, field.value))
-				}
-			}
-		}
-	}
-
-	// PersistentKeepalive keeps the client's NAT mapping alive while the
-	// phone is locked and idle; without it recovery after unlock is slow.
-	clientConfig := fmt.Sprintf(`[Interface]
-%s
-
-[Peer]
-PublicKey = %s
-PresharedKey = %s
-Endpoint = %s
-AllowedIPs = %s
-PersistentKeepalive = 25
-`, strings.Join(interfaceLines, "\n"),
-		wgParams.ServerPubKey, keys.preSharedKey, endpoint, wgParams.AllowedIPs)
+	clientConfig := buildClientConfigText(ipv4, ipv6, keys)
 
 	// Write client config to file
 	err = os.WriteFile(configPath, []byte(clientConfig), 0600)
@@ -1604,22 +1470,7 @@ PersistentKeepalive = 25
 	}
 
 	// Add client to server config
-	var allowedIPsParts []string
-	if ipv4 != "" {
-		allowedIPsParts = append(allowedIPsParts, ipv4+"/32")
-	}
-	if ipv6 != "" {
-		allowedIPsParts = append(allowedIPsParts, ipv6+"/128")
-	}
-	allowedIPs := strings.Join(allowedIPsParts, ",")
-
-	serverConfigUpdate := fmt.Sprintf(`
-### Client %s
-[Peer]
-PublicKey = %s
-PresharedKey = %s
-AllowedIPs = %s
-`, name, keys.publicKey, keys.preSharedKey, allowedIPs)
+	serverConfigUpdate := buildPeerBlock(clientMarker, name, ipv4, ipv6, keys)
 
 	// If the peer can't be appended to the server config, remove the client
 	// file written above — a leftover file makes clientExists treat the name
@@ -1728,7 +1579,7 @@ func deleteWireGuardClient(name string) error {
 	}
 
 	// Apply the configuration
-	if err := syncWireGuardConf(); err != nil {
+	if err := applyConfigLocked(); err != nil {
 		return fmt.Errorf("failed to sync WireGuard config: %v", err)
 	}
 
@@ -1780,7 +1631,7 @@ func generatePSK() (string, error) {
 }
 
 // Sync WireGuard/AmneziaWG configuration
-func syncWireGuardConf() error {
+func syncWireGuardConfRun() error {
 	stripCmd := exec.Command(wgQuickCmd, "strip", wgParams.ServerWGNIC)
 	var stripOutput bytes.Buffer
 	var stripError bytes.Buffer
@@ -1959,6 +1810,13 @@ func wireGuardStatsHandlerGin(c *gin.Context) {
 			peers = len(strings.Split(trimmed, "\n"))
 		}
 	}
+	// Spares are real kernel peers but not users; leave them out of the count.
+	if conf, err := os.ReadFile(WG_CONFIG_FILE); err == nil {
+		peers -= len(spareBlocksLocked(conf))
+		if peers < 0 {
+			peers = 0
+		}
+	}
 
 	c.JSON(http.StatusOK, APIResponse{
 		Success: true,
@@ -1966,9 +1824,13 @@ func wireGuardStatsHandlerGin(c *gin.Context) {
 	})
 }
 
+// sysClassNetDir is where the kernel exposes interface counters; a variable so
+// tests can point it at a fixture.
+var sysClassNetDir = "/sys/class/net"
+
 // readInterfaceCounter reads one kernel byte counter for an interface.
 func readInterfaceCounter(nic string, counter string) (uint64, error) {
-	raw, err := os.ReadFile(filepath.Join("/sys/class/net", nic, "statistics", counter))
+	raw, err := os.ReadFile(filepath.Join(sysClassNetDir, nic, "statistics", counter))
 	if err != nil {
 		return 0, err
 	}
@@ -2027,12 +1889,19 @@ func systemUptimeSeconds() uint64 {
 func wireGuardHealthHandlerGin(c *gin.Context) {
 	statusSuccess, _ := executeCommand(wgCmd, "show", wgParams.ServerWGNIC)
 
+	spareCount := 0
+	if conf, err := os.ReadFile(WG_CONFIG_FILE); err == nil {
+		spareCount = len(spareBlocksLocked(conf))
+	}
+
 	c.JSON(http.StatusOK, APIResponse{
 		Success: true,
 		Data: map[string]interface{}{
-			"running":   statusSuccess == "success",
-			"interface": wgParams.ServerWGNIC,
-			"profile":   AWG_PROFILE,
+			"running":      statusSuccess == "success",
+			"interface":    wgParams.ServerWGNIC,
+			"profile":      AWG_PROFILE,
+			"spare_count":  spareCount,
+			"spare_target": SPARE_POOL,
 		},
 	})
 }
@@ -2105,10 +1974,21 @@ func wireGuardStatusHandlerGin(c *gin.Context) {
 		}
 	}
 
+	// Spare peers are not users: build the set of their keys once.
+	spareKeys := map[string]bool{}
+	if conf, err := os.ReadFile(WG_CONFIG_FILE); err == nil {
+		for _, sp := range spareBlocksLocked(conf) {
+			spareKeys[sp.PublicKey] = true
+		}
+	}
+
 	// Find client names for each peer
 	clientPeers := make([]map[string]interface{}, 0, len(peers))
 	for _, peer := range peers {
 		publicKey, ok := peer["public_key"].(string)
+		if ok && publicKey != "" && spareKeys[publicKey] {
+			continue
+		}
 		if !ok || publicKey == "" {
 			clientPeers = append(clientPeers, peer)
 			continue
