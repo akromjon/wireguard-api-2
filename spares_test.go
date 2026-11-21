@@ -1,12 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -572,5 +575,78 @@ func TestStartSpareLoopReconcilesAtStartAndStops(t *testing.T) {
 	}
 	if calls := env.syncconfCalls(t); calls != 1 {
 		t.Fatalf("got %d syncconf calls, want 1", calls)
+	}
+}
+
+// lockedBuffer is a log destination a test can read while the loop writes.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (l *lockedBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.Write(p)
+}
+
+func (l *lockedBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.String()
+}
+
+func captureLog(t *testing.T) *lockedBuffer {
+	t.Helper()
+	out := &lockedBuffer{}
+	old := log.Writer()
+	log.SetOutput(out)
+	t.Cleanup(func() { log.SetOutput(old) })
+	return out
+}
+
+// runSpareLoopFor runs startSpareLoop with a 1 ms tick for d, then stops it.
+func runSpareLoopFor(t *testing.T, d time.Duration) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		startSpareLoop(ctx, time.Millisecond)
+		close(done)
+	}()
+	time.Sleep(d)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("startSpareLoop did not stop after cancel")
+	}
+}
+
+func TestSpareLoopWithPoolZeroReportsAnUnreadableConfOnce(t *testing.T) {
+	env := setupTestEnv(t)
+	resetReconcileState(t)
+	setSparePool(t, 0)
+	WG_CONFIG_FILE = filepath.Join(env.dir, "missing.conf") // setupTestEnv restores it
+	logs := captureLog(t)
+
+	runSpareLoopFor(t, 50*time.Millisecond)
+
+	if got := strings.Count(logs.String(), "spare reconcile failed"); got != 1 {
+		t.Fatalf("got %d failure lines with SPARE_POOL=0, want 1:\n%s", got, logs.String())
+	}
+}
+
+func TestSpareLoopWithPoolSetKeepsReportingFailures(t *testing.T) {
+	env := setupTestEnv(t)
+	resetReconcileState(t)
+	setSparePool(t, 2)
+	WG_CONFIG_FILE = filepath.Join(env.dir, "missing.conf") // setupTestEnv restores it
+	logs := captureLog(t)
+
+	runSpareLoopFor(t, 50*time.Millisecond)
+
+	if got := strings.Count(logs.String(), "spare reconcile failed"); got < 2 {
+		t.Fatalf("got %d failure lines with SPARE_POOL=2, want one per tick", got)
 	}
 }

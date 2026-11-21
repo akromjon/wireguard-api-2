@@ -1416,7 +1416,7 @@ func addWireGuardClient(name, ipv4, ipv6 string) (string, string, string, error)
 
 // Write the client config file and append the peer to the server config —
 // WITHOUT applying it. Caller must hold wgConfigMutex, supply pre-generated
-// keys (see generateClientKeys), and call syncWireGuardConf afterwards.
+// keys (see generateClientKeys), and call applyConfigLocked afterwards.
 func createWireGuardClientLocked(name, ipv4, ipv6 string, keys clientKeys) (string, error) {
 	// Ensure the clients directory exists
 	err := os.MkdirAll(WIREGUARD_CLIENTS, 0700)
@@ -1857,8 +1857,9 @@ func systemUptimeSeconds() uint64 {
 	return uint64(seconds)
 }
 
-// WireGuard health handler - returns only whether the VPN interface is up.
-// Keep this path side-effect free and independent from the detailed status
+// WireGuard health handler - returns whether the VPN interface is up, plus the
+// spare stock count and target. Keep this path side-effect free and
+// independent from the detailed status
 // endpoint, which synchronizes clients and collects peer/system diagnostics.
 func wireGuardHealthHandlerGin(c *gin.Context) {
 	statusSuccess, _ := executeCommand(wgCmd, "show", wgParams.ServerWGNIC)

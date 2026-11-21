@@ -535,11 +535,21 @@ func reconcileSpares(now time.Time, startup bool) (bool, error) {
 
 // startSpareLoop reconciles once right away (service start, also the path that
 // trims stock after SPARE_POOL is lowered), then every tick until ctx is done.
-// Errors are logged; it never exits the process.
+// Errors are logged; it never exits the process. With SPARE_POOL=0 a failure
+// (e.g. an unreadable config) is logged once until a run succeeds again, not
+// every tick: with the feature off this loop has nothing to report each minute.
 func startSpareLoop(ctx context.Context, tick time.Duration) {
+	reported := false
 	run := func(startup bool) {
-		if _, err := reconcileSpares(time.Now(), startup); err != nil {
+		_, err := reconcileSpares(time.Now(), startup)
+		switch {
+		case err == nil:
+			reported = false
+		case SPARE_POOL == 0 && reported:
+			// Already reported once; stay quiet until a run succeeds.
+		default:
 			log.Printf("spare reconcile failed: %v", err)
+			reported = true
 		}
 	}
 	run(true)
