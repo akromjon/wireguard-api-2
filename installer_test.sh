@@ -343,16 +343,20 @@ spare_pool_after() {
 		grep '^SPARE_POOL=' "${CONFIG_DIR}/.env" || echo none
 	)
 }
-[[ $(NONINTERACTIVE=1 CONFIG_POOL=200 spare_pool_after) == SPARE_POOL=200 ]] ||
+[[ $(UPGRADE_EXISTING_SERVICE=false NONINTERACTIVE=1 CONFIG_POOL=200 spare_pool_after) == SPARE_POOL=200 ]] ||
 	fail "headless install must set SPARE_POOL to CONFIG_POOL"
-[[ $(NONINTERACTIVE=1 spare_pool_after) == SPARE_POOL=1000 ]] ||
+[[ $(UPGRADE_EXISTING_SERVICE=false NONINTERACTIVE=1 spare_pool_after) == SPARE_POOL=1000 ]] ||
 	fail "headless install without CONFIG_POOL must default SPARE_POOL to the master pool of 1000"
-[[ $(NONINTERACTIVE=1 CONFIG_POOL=200 SPARE_POOL=50 spare_pool_after) == SPARE_POOL=50 ]] ||
+[[ $(UPGRADE_EXISTING_SERVICE=false NONINTERACTIVE=1 CONFIG_POOL=200 SPARE_POOL=50 spare_pool_after) == SPARE_POOL=50 ]] ||
 	fail "explicit SPARE_POOL must win"
-[[ $(NONINTERACTIVE=1 CONFIG_POOL=200 EXISTING_SPARE_LINE=SPARE_POOL=300 spare_pool_after) == SPARE_POOL=300 ]] ||
+[[ $(UPGRADE_EXISTING_SERVICE=false NONINTERACTIVE=1 CONFIG_POOL=200 EXISTING_SPARE_LINE=SPARE_POOL=300 spare_pool_after) == SPARE_POOL=300 ]] ||
 	fail "an existing SPARE_POOL must be kept"
-[[ $(NONINTERACTIVE=0 CONFIG_POOL=200 spare_pool_after) == none ]] ||
+[[ $(UPGRADE_EXISTING_SERVICE=false NONINTERACTIVE=0 CONFIG_POOL=200 spare_pool_after) == none ]] ||
 	fail "interactive install must leave SPARE_POOL unset"
+[[ $(UPGRADE_EXISTING_SERVICE=true NONINTERACTIVE=1 CONFIG_POOL=200 spare_pool_after) == none ]] ||
+	fail "a headless upgrade must not switch the spare stock on"
+[[ $(UPGRADE_EXISTING_SERVICE=true NONINTERACTIVE=1 SPARE_POOL=40 spare_pool_after) == SPARE_POOL=40 ]] ||
+	fail "an explicit SPARE_POOL must apply on upgrade too"
 
 # Written as an if, not `( ... ) && fail`, matching the negative-assertion
 # style used elsewhere in this file. (A non-final command in an && list is

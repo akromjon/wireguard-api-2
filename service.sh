@@ -162,10 +162,11 @@ prepare_environment() {
 
 	# Spare-peer stock (SPARE_POOL, read by the API at start): an explicit value
 	# wins; a headless install keeps one ready spare per served config
-	# (CONFIG_POOL, else the master default of 1000); an existing value is kept;
-	# interactive installs leave it unset (feature off).
+	# (CONFIG_POOL, else the default pool of 1000); an existing value is kept;
+	# interactive installs and upgrades leave it unset (feature off).
 	local spare_pool=${SPARE_POOL:-}
-	if [[ -z ${spare_pool} ]] && ! grep -q '^SPARE_POOL=' "${CONFIG_DIR}/.env" && [[ ${NONINTERACTIVE:-0} == 1 ]]; then
+	if [[ -z ${spare_pool} ]] && ! grep -q '^SPARE_POOL=' "${CONFIG_DIR}/.env" &&
+		[[ ${NONINTERACTIVE:-0} == 1 && ${UPGRADE_EXISTING_SERVICE} != true ]]; then
 		spare_pool=${CONFIG_POOL:-1000}
 	fi
 	if [[ ${spare_pool} =~ ^[0-9]+$ ]]; then
