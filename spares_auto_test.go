@@ -95,3 +95,49 @@ func TestReconcileAutoFillsToClientCount(t *testing.T) {
 		t.Fatalf("second reconcile must be a no-op: ran=%v err=%v", ran, err)
 	}
 }
+
+func TestAutoStockClaimRaisesTargetAndBulkDeleteRefills(t *testing.T) {
+	env := setupTestEnv(t)
+	setSparePoolAuto(t)
+	for _, n := range []string{"a1", "a2", "a3"} {
+		env.addUser(t, n)
+	}
+
+	if w := env.authedRequest(t, http.MethodPost, "/api/users/claim", map[string]any{"names": []string{"n1", "n2"}}); w.Code != http.StatusOK {
+		t.Fatalf("claim: %d %s", w.Code, w.Body.String())
+	}
+	if c, tg := env.healthSpares(t); c != 1 || tg != 5 {
+		t.Fatalf("after claiming 2: spares %d target %d, want 1/5", c, tg)
+	}
+
+	if w := env.authedRequest(t, http.MethodPost, "/api/users/delete-bulk", map[string]any{"names": []string{"a1", "a2"}}); w.Code != http.StatusOK {
+		t.Fatalf("delete-bulk: %d %s", w.Code, w.Body.String())
+	}
+	if c, tg := env.healthSpares(t); c != 3 || tg != 3 {
+		t.Fatalf("after burning the 2 old clients: spares %d target %d, want 3/3", c, tg)
+	}
+}
+
+// With no clients there is nothing to back up: delete-all empties the stock and
+// re-adding clients grows it back in the same applies.
+func TestAutoStockDeleteAllThenRegrow(t *testing.T) {
+	env := setupTestEnv(t)
+	setSparePoolAuto(t)
+	for _, n := range []string{"a1", "a2", "a3"} {
+		env.addUser(t, n)
+	}
+
+	if w := env.authedRequest(t, http.MethodPost, "/api/users/delete-all", nil); w.Code != http.StatusOK {
+		t.Fatalf("delete-all: %d %s", w.Code, w.Body.String())
+	}
+	if c, tg := env.healthSpares(t); c != 0 || tg != 0 {
+		t.Fatalf("after delete-all: spares %d target %d, want 0/0", c, tg)
+	}
+
+	if w := env.authedRequest(t, http.MethodPost, "/api/users/add-bulk", map[string]any{"names": []string{"r1", "r2"}}); w.Code != http.StatusOK {
+		t.Fatalf("add-bulk: %d %s", w.Code, w.Body.String())
+	}
+	if c, tg := env.healthSpares(t); c != 2 || tg != 2 {
+		t.Fatalf("after re-adding 2: spares %d target %d, want 2/2", c, tg)
+	}
+}

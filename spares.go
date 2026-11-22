@@ -19,7 +19,7 @@ import (
 // [Peer] block in the server config (marker "### Spare <name>"), applied to the
 // kernel like any client, whose private key is written to a file under
 // spareDir() that nobody holds until the spare is claimed. With SPARE_POOL=0
-// (default) none of this runs.
+// (default) none of this runs; SPARE_POOL=auto keeps one spare per client.
 
 const (
 	clientMarker      = "### Client "
