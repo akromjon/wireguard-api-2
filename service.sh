@@ -159,6 +159,18 @@ prepare_environment() {
 	set_env_value WG_CONFIG_FILE "${WG_CONFIG_FILE}"
 	set_env_value WG_PARAMS_FILE "${WG_PARAMS_FILE}"
 	set_env_value WIREGUARD_CLIENTS "${WIREGUARD_CLIENTS}"
+
+	# Spare-peer stock (SPARE_POOL, read by the API at start): an explicit value
+	# wins; a headless install keeps one ready spare per served config
+	# (CONFIG_POOL, else the master default of 1000); an existing value is kept;
+	# interactive installs leave it unset (feature off).
+	local spare_pool=${SPARE_POOL:-}
+	if [[ -z ${spare_pool} ]] && ! grep -q '^SPARE_POOL=' "${CONFIG_DIR}/.env" && [[ ${NONINTERACTIVE:-0} == 1 ]]; then
+		spare_pool=${CONFIG_POOL:-1000}
+	fi
+	if [[ ${spare_pool} =~ ^[0-9]+$ ]]; then
+		set_env_value SPARE_POOL "${spare_pool}"
+	fi
 }
 
 install_service() (

@@ -328,6 +328,32 @@ grep -qx 'AWG_PROFILE=awg2' "${CONFIG_DIR}/.env" || fail "service.sh must defaul
 	grep -qx 'AWG_PROFILE=awg3' "${CONFIG_DIR}/.env"
 ) || fail "service.sh must record AWG_PROFILE=awg3 for an awg3 install"
 
+# Spare-peer stock: a headless (registered) install keeps one ready spare per
+# served config; an explicit SPARE_POOL wins; an existing value is never
+# overwritten; an interactive install keeps the feature off (default 0).
+spare_pool_after() {
+	(
+		CONFIG_DIR="${TEST_AWG_DIR}/wireguard-api-spare"
+		rm -rf "${CONFIG_DIR}"
+		mkdir -p "${CONFIG_DIR}"
+		printf '%s\n' 'API_PORT=8080' 'API_TOKEN=legacy-api-token-1234567890' ${EXISTING_SPARE_LINE:-} >"${CONFIG_DIR}/.env"
+		# shellcheck source=service.sh
+		source "${SCRIPT_DIR}/service.sh"
+		prepare_environment
+		grep '^SPARE_POOL=' "${CONFIG_DIR}/.env" || echo none
+	)
+}
+[[ $(NONINTERACTIVE=1 CONFIG_POOL=200 spare_pool_after) == SPARE_POOL=200 ]] ||
+	fail "headless install must set SPARE_POOL to CONFIG_POOL"
+[[ $(NONINTERACTIVE=1 spare_pool_after) == SPARE_POOL=1000 ]] ||
+	fail "headless install without CONFIG_POOL must default SPARE_POOL to the master pool of 1000"
+[[ $(NONINTERACTIVE=1 CONFIG_POOL=200 SPARE_POOL=50 spare_pool_after) == SPARE_POOL=50 ]] ||
+	fail "explicit SPARE_POOL must win"
+[[ $(NONINTERACTIVE=1 CONFIG_POOL=200 EXISTING_SPARE_LINE=SPARE_POOL=300 spare_pool_after) == SPARE_POOL=300 ]] ||
+	fail "an existing SPARE_POOL must be kept"
+[[ $(NONINTERACTIVE=0 CONFIG_POOL=200 spare_pool_after) == none ]] ||
+	fail "interactive install must leave SPARE_POOL unset"
+
 # Written as an if, not `( ... ) && fail`, matching the negative-assertion
 # style used elsewhere in this file. (A non-final command in an && list is
 # exempt from errexit, so `( ... ) && fail` would not abort the run either —
