@@ -30,6 +30,12 @@ const (
 // SPARE_POOL is the target number of spare peers kept in the server config.
 var SPARE_POOL int
 
+// sparePoolAuto (SPARE_POOL=auto) makes the target follow the current client
+// count: one ready spare per client, recomputed on every apply.
+var sparePoolAuto bool
+
+var clientMarkerRegex = regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(clientMarker))
+
 // Result of the most recent syncWireGuardConf; guarded by wgConfigMutex.
 var (
 	lastApplyOK bool
@@ -58,6 +64,23 @@ func parseSparePool(raw string) int {
 		return 0
 	}
 	return n
+}
+
+// parseSparePoolSetting reads SPARE_POOL: "auto" (any case) turns on the
+// client-count target, anything else goes through parseSparePool.
+func parseSparePoolSetting(raw string) (int, bool) {
+	if strings.EqualFold(strings.TrimSpace(raw), "auto") {
+		return 0, true
+	}
+	return parseSparePool(raw), false
+}
+
+// spareTargetFor returns the wanted stock size for conf.
+func spareTargetFor(conf []byte) int {
+	if sparePoolAuto {
+		return len(clientMarkerRegex.FindAllIndex(conf, -1))
+	}
+	return SPARE_POOL
 }
 
 func spareDir() string {
@@ -381,7 +404,7 @@ func topUpSparesLocked() (created, trimmed int, err error) {
 		return 0, 0, fmt.Errorf("failed to read WireGuard config: %v", err)
 	}
 	have := spareBlocksLocked(conf)
-	target := SPARE_POOL
+	target := spareTargetFor(conf)
 	if target < 0 {
 		target = 0
 	}
@@ -506,7 +529,7 @@ func reconcileSpares(now time.Time, startup bool) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("failed to read WireGuard config: %v", err)
 	}
-	if len(spareBlocksLocked(conf)) == SPARE_POOL {
+	if len(spareBlocksLocked(conf)) == spareTargetFor(conf) {
 		return false, nil
 	}
 
@@ -514,11 +537,11 @@ func reconcileSpares(now time.Time, startup bool) (bool, error) {
 	defer wgConfigMutex.Unlock()
 
 	// Another write may have fixed the stock meanwhile.
-	have, err := spareCountLocked()
+	conf, err = os.ReadFile(WG_CONFIG_FILE)
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("failed to read WireGuard config: %v", err)
 	}
-	if have == SPARE_POOL {
+	if len(spareBlocksLocked(conf)) == spareTargetFor(conf) {
 		return false, nil
 	}
 	if !startup {
@@ -545,7 +568,7 @@ func startSpareLoop(ctx context.Context, tick time.Duration) {
 		switch {
 		case err == nil:
 			reported = false
-		case SPARE_POOL == 0 && reported:
+		case SPARE_POOL == 0 && !sparePoolAuto && reported:
 			// Already reported once; stay quiet until a run succeeds.
 		default:
 			log.Printf("spare reconcile failed: %v", err)

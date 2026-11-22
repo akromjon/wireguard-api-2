@@ -260,7 +260,7 @@ func loadEnv() {
 		paramsFileExplicit = false
 	}
 	DEBUG_MODE = getEnv("DEBUG_MODE", "false") == "true"
-	SPARE_POOL = parseSparePool(getEnv("SPARE_POOL", "0"))
+	SPARE_POOL, sparePoolAuto = parseSparePoolSetting(getEnv("SPARE_POOL", "0"))
 	USE_UDP_443_ENDPOINT = strings.EqualFold(getEnv("USE_UDP_443_ENDPOINT", "false"), "true")
 	AWG_PROFILE = strings.ToLower(getEnv("AWG_PROFILE", "awg2"))
 
@@ -1846,9 +1846,10 @@ func systemUptimeSeconds() uint64 {
 func wireGuardHealthHandlerGin(c *gin.Context) {
 	statusSuccess, _ := executeCommand(wgCmd, "show", wgParams.ServerWGNIC)
 
-	spareCount := 0
+	spareCount, spareTarget := 0, SPARE_POOL
 	if conf, err := os.ReadFile(WG_CONFIG_FILE); err == nil {
 		spareCount = len(spareBlocksLocked(conf))
+		spareTarget = spareTargetFor(conf)
 	}
 
 	c.JSON(http.StatusOK, APIResponse{
@@ -1858,7 +1859,7 @@ func wireGuardHealthHandlerGin(c *gin.Context) {
 			"interface":    wgParams.ServerWGNIC,
 			"profile":      AWG_PROFILE,
 			"spare_count":  spareCount,
-			"spare_target": SPARE_POOL,
+			"spare_target": spareTarget,
 		},
 	})
 }
