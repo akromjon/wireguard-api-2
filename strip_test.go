@@ -60,6 +60,11 @@ func TestStripQuickConfig(t *testing.T) {
 			want: "\n",
 		},
 		{
+			name: "nul bytes dropped like bash read",
+			in:   "[Interface]\nAddr\x00ess = x\nListenPort = 1\n\x00",
+			want: "[Interface]\nListenPort = 1\n\n",
+		},
+		{
 			name:    "bad SaveConfig",
 			in:      "[Interface]\nSaveConfig = maybe\n",
 			wantErr: "SaveConfig",

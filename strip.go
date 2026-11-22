@@ -23,7 +23,9 @@ var quickOnlyKeys = []string{
 //     ends with one extra newline (from `echo`).
 //
 // A SaveConfig value other than true/false is an error, as in wg-quick.
+// NUL bytes are dropped first, as bash `read` does.
 func stripQuickConfig(conf []byte) ([]byte, error) {
+	conf = bytes.ReplaceAll(conf, []byte{0}, nil)
 	lines := strings.Split(string(conf), "\n")
 	last := len(lines) - 1
 
