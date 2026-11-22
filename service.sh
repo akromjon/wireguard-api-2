@@ -161,15 +161,15 @@ prepare_environment() {
 	set_env_value WIREGUARD_CLIENTS "${WIREGUARD_CLIENTS}"
 
 	# Spare-peer stock (SPARE_POOL, read by the API at start): an explicit value
-	# wins; a headless install keeps one ready spare per served config
-	# (CONFIG_POOL, else the default pool of 1000); an existing value is kept;
-	# interactive installs and upgrades leave it unset (feature off).
+	# (a number or "auto") wins; a fresh headless install uses "auto", one ready
+	# spare per current client; an existing value is kept; interactive installs
+	# and upgrades leave it unset (feature off).
 	local spare_pool=${SPARE_POOL:-}
 	if [[ -z ${spare_pool} ]] && ! grep -q '^SPARE_POOL=' "${CONFIG_DIR}/.env" &&
 		[[ ${NONINTERACTIVE:-0} == 1 && ${UPGRADE_EXISTING_SERVICE} != true ]]; then
-		spare_pool=${CONFIG_POOL:-1000}
+		spare_pool=auto
 	fi
-	if [[ ${spare_pool} =~ ^[0-9]+$ ]]; then
+	if [[ ${spare_pool} =~ ^([0-9]+|auto)$ ]]; then
 		set_env_value SPARE_POOL "${spare_pool}"
 	fi
 }
