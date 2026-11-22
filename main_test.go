@@ -38,10 +38,6 @@ case "$1" in
   genkey) echo "priv$RANDOM$RANDOM$RANDOM" ;;
   pubkey) echo "pub-$(cat)" ;;
   genpsk) echo "psk$RANDOM$RANDOM$RANDOM" ;;
-  strip)
-    if [ -f "$dir/strip_output" ]; then cat "$dir/strip_output"; fi
-    exit 0
-    ;;
   showconf)
     if [ -f "$dir/showconf_fail" ]; then
       echo "fake showconf failure" >&2

@@ -38,7 +38,9 @@ func syncWithKeys(t *testing.T, fileConf, liveConf string, showconfFail bool) *t
 			t.Fatal(err)
 		}
 	}
-	write("strip_output", fileConf)
+	if err := os.WriteFile(WG_CONFIG_FILE, []byte(fileConf), 0600); err != nil {
+		t.Fatal(err)
+	}
 	write("showconf_output", liveConf)
 	if showconfFail {
 		write("showconf_fail", "")

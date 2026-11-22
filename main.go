@@ -1606,23 +1606,19 @@ func generatePSK() (string, error) {
 
 // Sync WireGuard/AmneziaWG configuration
 func syncWireGuardConfRun() error {
-	stripCmd := exec.Command(wgQuickCmd, "strip", wgParams.ServerWGNIC)
-	var stripOutput bytes.Buffer
-	var stripError bytes.Buffer
-	stripCmd.Stdout = &stripOutput
-	stripCmd.Stderr = &stripError
-
-	err := stripCmd.Run()
+	// Strip in-process: forking the wg-quick/awg-quick bash parser cost 1-2 s
+	// of CPU per apply on large configs; the output is byte-identical.
+	conf, err := os.ReadFile(WG_CONFIG_FILE)
 	if err != nil {
-		if DEBUG_MODE {
-			log.Printf("%s strip command failed: %v", wgQuickCmd, err)
-			log.Printf("stderr: %s", stripError.String())
-		}
-		return fmt.Errorf("%s strip command failed: %v, stderr: %s", wgQuickCmd, err, stripError.String())
+		return fmt.Errorf("failed to read WireGuard config: %v", err)
+	}
+	stripped, err := stripQuickConfig(conf)
+	if err != nil {
+		return fmt.Errorf("failed to strip WireGuard config: %v", err)
 	}
 
 	syncCmd := exec.Command(wgCmd, "syncconf", wgParams.ServerWGNIC, "/dev/stdin")
-	syncCmd.Stdin = bytes.NewReader(filterHeaderProtectionKey(stripOutput.Bytes()))
+	syncCmd.Stdin = bytes.NewReader(filterHeaderProtectionKey(stripped))
 	var syncError bytes.Buffer
 	syncCmd.Stderr = &syncError
 

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -84,5 +86,61 @@ func TestStripQuickConfig(t *testing.T) {
 				t.Errorf("got  %q\nwant %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func invocationLines(t *testing.T, env *testEnv) []string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(env.dir, "invocations.log"))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		t.Fatalf("reading invocations log: %v", err)
+	}
+	return strings.Split(strings.TrimSpace(string(data)), "\n")
+}
+
+func TestApplyNeverRunsQuickStrip(t *testing.T) {
+	env := setupTestEnv(t)
+	conf, err := os.ReadFile(WG_CONFIG_FILE)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := stripQuickConfig(conf)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := syncWireGuardConf(); err != nil {
+		t.Fatalf("syncWireGuardConf: %v", err)
+	}
+
+	for _, l := range invocationLines(t, env) {
+		if l == "strip" {
+			t.Fatalf("apply must not run the quick strip script, invocations: %v", invocationLines(t, env))
+		}
+	}
+	got := env.lastSyncconfStdin(t)
+	if got != string(want) {
+		t.Errorf("syncconf stdin = %q, want %q", got, want)
+	}
+	if strings.Contains(got, "Address") {
+		t.Errorf("Address must be stripped from syncconf input, got %q", got)
+	}
+}
+
+func TestApplyFailsWithoutSyncOnBadStrip(t *testing.T) {
+	env := setupTestEnv(t)
+	bad := "[Interface]\nListenPort = 51820\nSaveConfig = maybe\n"
+	if err := os.WriteFile(WG_CONFIG_FILE, []byte(bad), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := syncWireGuardConf(); err == nil {
+		t.Fatal("want an error for an invalid SaveConfig value")
+	}
+	if n := env.syncconfCalls(t); n != 0 {
+		t.Errorf("syncconf must not run when the strip fails, ran %d times", n)
 	}
 }
