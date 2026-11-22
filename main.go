@@ -1354,27 +1354,13 @@ type clientKeys struct {
 	preSharedKey string
 }
 
-// Key generation shells out to wg/awg but reads no shared state, so callers
-// run it BEFORE taking wgConfigMutex to keep lock holds short — a bulk batch
-// spawns 3 subprocesses per client, which would otherwise all sit inside the
-// lock and stall every other handler.
+// Key generation reads no shared state, so callers run it BEFORE taking
+// wgConfigMutex to keep lock holds short. Keys are made in-process (same
+// material as `wg genkey | wg pubkey` and `wg genpsk`); spawning 3
+// subprocesses per client made a 1000-client bulk add cost tens of seconds of
+// CPU on small boxes.
 func generateClientKeys() (clientKeys, error) {
-	privateKey, err := generatePrivateKey()
-	if err != nil {
-		return clientKeys{}, fmt.Errorf("failed to generate private key: %v", err)
-	}
-
-	publicKey, err := derivePublicKey(privateKey)
-	if err != nil {
-		return clientKeys{}, fmt.Errorf("failed to derive public key: %v", err)
-	}
-
-	preSharedKey, err := generatePSK()
-	if err != nil {
-		return clientKeys{}, fmt.Errorf("failed to generate pre-shared key: %v", err)
-	}
-
-	return clientKeys{privateKey: privateKey, publicKey: publicKey, preSharedKey: preSharedKey}, nil
+	return generateClientKeysNative()
 }
 
 // Add a single client and apply the config. The existence check and IP
