@@ -1,12 +1,20 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"io"
+	"log"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 type dumpPeer struct {
@@ -303,5 +311,256 @@ func TestLastPeersUpdatedOnCollect(t *testing.T) {
 	defer usageMu.Unlock()
 	if len(lastPeers) != 1 || lastPeers[0].PublicKey != "pubA" {
 		t.Fatalf("lastPeers = %+v", lastPeers)
+	}
+}
+
+// fakeMaster answers with the scripted statuses in order (last one repeats).
+type fakeMaster struct {
+	srv      *httptest.Server
+	mu       sync.Mutex
+	statuses []int
+	body     string
+	keys     []string
+	bodies   []usageBatch
+	raw      []string
+}
+
+func newFakeMaster(t *testing.T, body string, statuses ...int) *fakeMaster {
+	t.Helper()
+	m := &fakeMaster{statuses: statuses, body: body}
+	m.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		var b usageBatch
+		_ = json.Unmarshal(raw, &b)
+		m.mu.Lock()
+		i := len(m.bodies)
+		m.keys = append(m.keys, r.Header.Get("key"))
+		m.bodies = append(m.bodies, b)
+		m.raw = append(m.raw, string(raw))
+		st := m.statuses[len(m.statuses)-1]
+		if i < len(m.statuses) {
+			st = m.statuses[i]
+		}
+		m.mu.Unlock()
+		w.WriteHeader(st)
+		if st == 200 {
+			io.WriteString(w, m.body)
+		}
+	}))
+	old := USAGE_PUSH_URL
+	USAGE_PUSH_URL = m.srv.URL + "/node-usage"
+	t.Cleanup(func() { m.srv.Close(); USAGE_PUSH_URL = old })
+	return m
+}
+
+func (m *fakeMaster) count() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.bodies)
+}
+
+func seedPending(n int) []string {
+	usageMu.Lock()
+	defer usageMu.Unlock()
+	var ids []string
+	for i := 0; i < n; i++ {
+		id := fmt.Sprintf("00000000-0000-4000-8000-%012d", i)
+		ids = append(ids, id)
+		usageSt.Pending = append(usageSt.Pending, usageBatch{BatchID: id, SentAt: time.Now().UTC(),
+			Peers: []usageEntry{{PublicKey: "pubA", AllowedIP: "10.66.0.61", RX: 1, TX: 1}}})
+	}
+	return ids
+}
+
+func pendingIDs() []string {
+	usageMu.Lock()
+	defer usageMu.Unlock()
+	var ids []string
+	for _, b := range usageSt.Pending {
+		ids = append(ids, b.BatchID)
+	}
+	return ids
+}
+
+func TestTickSendsDeltaWithKeyHeader(t *testing.T) {
+	env := setupUsage(t)
+	m := newFakeMaster(t, `{"ok":true,"limits":[]}`, 200)
+	env.setDump(t, dumpPeer{"pubA", "10.66.0.61/32", 5000, 9000})
+	mustCollect(t)
+	env.setDump(t, dumpPeer{"pubA", "10.66.0.61/32", 6500, 9000})
+	usageTick(time.Now())
+	if m.count() != 1 {
+		t.Fatalf("requests = %d, want 1", m.count())
+	}
+	if m.keys[0] != "test-token" {
+		t.Fatalf("key header = %q", m.keys[0])
+	}
+	b := m.bodies[0]
+	want := []usageEntry{{PublicKey: "pubA", AllowedIP: "10.66.0.61", RX: 1500, TX: 0}}
+	if len(b.Peers) != 1 || b.Peers[0] != want[0] {
+		t.Fatalf("peers = %+v", b.Peers)
+	}
+	if !regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`).MatchString(b.BatchID) {
+		t.Fatalf("batch_id = %q", b.BatchID)
+	}
+	var generic map[string]interface{}
+	if err := json.Unmarshal([]byte(m.raw[0]), &generic); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := time.Parse(time.RFC3339, generic["sent_at"].(string)); err != nil {
+		t.Fatalf("sent_at: %v", err)
+	}
+	if !strings.HasSuffix(generic["sent_at"].(string), "Z") {
+		t.Fatalf("sent_at not UTC: %v", generic["sent_at"])
+	}
+	if got := pendingIDs(); len(got) != 0 {
+		t.Fatalf("Pending = %v", got)
+	}
+}
+
+func TestHeartbeatWhenNothingToSend(t *testing.T) {
+	env := setupUsage(t)
+	m := newFakeMaster(t, `{"ok":true,"limits":[]}`, 200)
+	env.setDump(t, dumpPeer{"pubA", "10.66.0.61/32", 5000, 9000})
+	usageTick(time.Now())
+	if m.count() != 1 {
+		t.Fatalf("requests = %d, want 1", m.count())
+	}
+	if !strings.Contains(m.raw[0], `"peers":[]`) {
+		t.Fatalf("body = %s", m.raw[0])
+	}
+	if got := pendingIDs(); len(got) != 0 {
+		t.Fatalf("Pending = %v", got)
+	}
+}
+
+func TestRetrySendsSameBatchID(t *testing.T) {
+	env := setupUsage(t)
+	m := newFakeMaster(t, `{"ok":true,"limits":[]}`, 503, 200)
+	env.setDump(t, dumpPeer{"pubA", "10.66.0.61/32", 5000, 9000})
+	mustCollect(t)
+	env.setDump(t, dumpPeer{"pubA", "10.66.0.61/32", 6500, 9000})
+	usageTick(time.Now())
+	if got := pendingIDs(); len(got) != 1 {
+		t.Fatalf("after 503 Pending = %v", got)
+	}
+	usageTick(time.Now())
+	if m.count() != 2 || m.bodies[0].BatchID != m.bodies[1].BatchID {
+		t.Fatalf("count=%d ids=%v", m.count(), m.bodies)
+	}
+	if got := pendingIDs(); len(got) != 0 {
+		t.Fatalf("Pending = %v", got)
+	}
+}
+
+func TestOrderOldestFirstStopsAtFailure(t *testing.T) {
+	setupUsage(t)
+	m := newFakeMaster(t, `{"ok":true,"limits":[]}`, 200, 500)
+	ids := seedPending(3)
+	pushPending(time.Now())
+	if m.count() != 2 {
+		t.Fatalf("requests = %d, want 2", m.count())
+	}
+	if m.bodies[0].BatchID != ids[0] || m.bodies[1].BatchID != ids[1] {
+		t.Fatalf("order wrong: %v", m.bodies)
+	}
+	got := pendingIDs()
+	if len(got) != 2 || got[0] != ids[1] || got[1] != ids[2] {
+		t.Fatalf("Pending = %v", got)
+	}
+}
+
+func TestOther4xxDropsBatch(t *testing.T) {
+	setupUsage(t)
+	newFakeMaster(t, "", 422)
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+	seedPending(1)
+	_, ok := pushPending(time.Now())
+	if ok {
+		t.Fatal("ok = true on 422")
+	}
+	if got := pendingIDs(); len(got) != 0 {
+		t.Fatalf("Pending = %v", got)
+	}
+	if !strings.Contains(buf.String(), "dropped") {
+		t.Fatalf("log = %q", buf.String())
+	}
+}
+
+func Test404KeepsBatch(t *testing.T) {
+	setupUsage(t)
+	newFakeMaster(t, "", 404)
+	seedPending(1)
+	pushPending(time.Now())
+	if got := pendingIDs(); len(got) != 1 {
+		t.Fatalf("Pending = %v", got)
+	}
+}
+
+func TestLimitsFromLastAnswer(t *testing.T) {
+	setupUsage(t)
+	newFakeMaster(t, `{"ok":true,"limits":[{"allowed_ip":"10.66.0.61","rate_kbps":256}]}`, 200)
+	seedPending(2)
+	limits, ok := pushPending(time.Now())
+	if !ok || len(limits) != 1 || limits[0].AllowedIP != "10.66.0.61" || limits[0].RateKbps != 256 {
+		t.Fatalf("limits=%v ok=%v", limits, ok)
+	}
+}
+
+func TestUndecodable200AcknowledgesButNotOK(t *testing.T) {
+	setupUsage(t)
+	newFakeMaster(t, `not json`, 200)
+	seedPending(1)
+	_, ok := pushPending(time.Now())
+	if ok {
+		t.Fatal("ok = true for undecodable body")
+	}
+	if got := pendingIDs(); len(got) != 0 {
+		t.Fatalf("Pending = %v", got)
+	}
+}
+
+func TestPendingCappedAt2000(t *testing.T) {
+	setupUsage(t)
+	for i := 0; i <= 2000; i++ {
+		usageMu.Lock()
+		usageSt.Open = map[string]usageEntry{"pubA": {PublicKey: "pubA", AllowedIP: "10.66.0.61", RX: uint64(i + 1)}}
+		usageMu.Unlock()
+		sealOpenBatch(time.Now())
+	}
+	st := snapshot()
+	if len(st.Pending) != 2000 {
+		t.Fatalf("len = %d", len(st.Pending))
+	}
+	if st.Pending[0].Peers[0].RX != 2 {
+		t.Fatalf("oldest RX = %d, want 2 (first dropped)", st.Pending[0].Peers[0].RX)
+	}
+	if len(st.Open) != 0 {
+		t.Fatalf("Open not cleared")
+	}
+}
+
+func TestPendingSurvivesRestart(t *testing.T) {
+	env := setupUsage(t)
+	m := newFakeMaster(t, "", 503)
+	env.setDump(t, dumpPeer{"pubA", "10.66.0.61/32", 5000, 9000})
+	mustCollect(t)
+	env.setDump(t, dumpPeer{"pubA", "10.66.0.61/32", 6500, 9000})
+	usageTick(time.Now())
+	want := pendingIDs()
+	if len(want) != 1 || m.count() != 1 {
+		t.Fatalf("want=%v count=%d", want, m.count())
+	}
+	resetUsageMemory()
+	usageMu.Lock()
+	err := loadUsageState()
+	usageMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := pendingIDs(); len(got) != 1 || got[0] != want[0] {
+		t.Fatalf("after restart = %v, want %v", got, want)
 	}
 }

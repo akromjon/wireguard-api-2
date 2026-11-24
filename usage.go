@@ -1,12 +1,20 @@
 package main
 
 import (
+	"bytes"
+	"context"
+	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -244,5 +252,191 @@ func collectUsage() error {
 func collectUsageLogged() {
 	if err := collectUsage(); err != nil {
 		log.Printf("usage meter: %v", err)
+	}
+}
+
+const maxPendingBatches = 2000
+
+// usageHTTPClient sends the batches; tests swap it.
+var usageHTTPClient = &http.Client{Timeout: 10 * time.Second}
+
+// nodeLimit is one per-peer rate limit the master asks for.
+type nodeLimit struct {
+	AllowedIP string `json:"allowed_ip"`
+	RateKbps  int    `json:"rate_kbps"`
+}
+
+type usageAnswer struct {
+	OK     bool        `json:"ok"`
+	Limits []nodeLimit `json:"limits"`
+}
+
+// applyLimits is replaced by the real nftables work later.
+func applyLimits(limits []nodeLimit) error { return nil }
+
+func newBatchID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// crypto/rand failing is not recoverable in any useful way.
+		panic(err)
+	}
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
+// sealOpenBatch moves the open deltas into a new pending batch and saves.
+// Does nothing when there is nothing open.
+func sealOpenBatch(now time.Time) {
+	usageMu.Lock()
+	defer usageMu.Unlock()
+	if len(usageSt.Open) == 0 {
+		return
+	}
+	peers := make([]usageEntry, 0, len(usageSt.Open))
+	for _, e := range usageSt.Open {
+		peers = append(peers, e)
+	}
+	sort.Slice(peers, func(i, j int) bool { return peers[i].PublicKey < peers[j].PublicKey })
+	usageSt.Pending = append(usageSt.Pending, usageBatch{
+		BatchID: newBatchID(),
+		SentAt:  now.UTC().Truncate(time.Second),
+		Peers:   peers,
+	})
+	usageSt.Open = map[string]usageEntry{}
+	if over := len(usageSt.Pending) - maxPendingBatches; over > 0 {
+		usageSt.Pending = append([]usageBatch(nil), usageSt.Pending[over:]...)
+		log.Printf("usage push: outbox full, dropped %d oldest batches", over)
+	}
+	if err := saveUsageState(); err != nil {
+		log.Printf("usage push: saving state: %v", err)
+	}
+}
+
+func usageURLHost() string {
+	if u, err := url.Parse(USAGE_PUSH_URL); err == nil {
+		return u.Host
+	}
+	return "?"
+}
+
+// sendBatch posts one batch. It returns the HTTP status (0 on a transport
+// error) and the decoded answer (nil unless a 200 body decoded).
+func sendBatch(b usageBatch) (int, *usageAnswer) {
+	if b.Peers == nil {
+		b.Peers = []usageEntry{}
+	}
+	body, err := json.Marshal(b)
+	if err != nil {
+		log.Printf("usage push: encoding batch: %v", err)
+		return 0, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, USAGE_PUSH_URL, bytes.NewReader(body))
+	if err != nil {
+		log.Printf("usage push: bad request for host %s", usageURLHost())
+		return 0, nil
+	}
+	req.Header.Set("key", API_TOKEN)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := usageHTTPClient.Do(req)
+	if err != nil {
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			err = ue.Err // the url.Error text repeats the full URL
+		}
+		log.Printf("usage push to %s failed: %v", usageURLHost(), err)
+		return 0, nil
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode != http.StatusOK {
+		return resp.StatusCode, nil
+	}
+	var ans usageAnswer
+	if err := json.Unmarshal(data, &ans); err != nil || !ans.OK {
+		return resp.StatusCode, nil
+	}
+	return resp.StatusCode, &ans
+}
+
+// pushPending sends the outbox oldest-first, one request per batch. It never
+// holds usageMu during HTTP. limits/ok come from the last 200 answer that
+// decoded; ok=false leaves the limits unchanged.
+func pushPending(now time.Time) (limits []nodeLimit, ok bool) {
+	usageMu.Lock()
+	batches := append([]usageBatch(nil), usageSt.Pending...)
+	usageMu.Unlock()
+
+	stored := true
+	if len(batches) == 0 {
+		// Heartbeat: lets the master see the node alive and answer limits.
+		batches = []usageBatch{{BatchID: newBatchID(), SentAt: now.UTC().Truncate(time.Second), Peers: []usageEntry{}}}
+		stored = false
+	}
+
+	done := map[string]bool{}
+	for _, b := range batches {
+		status, ans := sendBatch(b)
+		if status == http.StatusOK {
+			done[b.BatchID] = true
+			if ans != nil {
+				limits, ok = ans.Limits, true
+			}
+			continue
+		}
+		if status >= 400 && status < 500 && status != 404 && status != 429 {
+			log.Printf("usage push: master answered %d, dropped batch %s", status, b.BatchID)
+			done[b.BatchID] = true
+			continue
+		}
+		if status != 0 {
+			log.Printf("usage push: master answered %d, keeping outbox", status)
+		}
+		break
+	}
+
+	if stored && len(done) > 0 {
+		usageMu.Lock()
+		kept := usageSt.Pending[:0:0]
+		for _, b := range usageSt.Pending {
+			if !done[b.BatchID] {
+				kept = append(kept, b)
+			}
+		}
+		usageSt.Pending = kept
+		if err := saveUsageState(); err != nil {
+			log.Printf("usage push: saving state: %v", err)
+		}
+		usageMu.Unlock()
+	}
+	return limits, ok
+}
+
+// usageTick is one push cycle.
+func usageTick(now time.Time) {
+	collectUsageLogged()
+	sealOpenBatch(now)
+	limits, ok := pushPending(now)
+	if ok {
+		if err := applyLimits(limits); err != nil {
+			log.Printf("usage push: applying limits: %v", err)
+		}
+	}
+}
+
+// startUsageLoop ticks right away, then every tick until ctx is done.
+func startUsageLoop(ctx context.Context, tick time.Duration) {
+	usageTick(time.Now())
+	t := time.NewTicker(tick)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			usageTick(time.Now())
+		}
 	}
 }

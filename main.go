@@ -290,6 +290,9 @@ func main() {
 	}
 
 	go startSpareLoop(context.Background(), time.Minute)
+	if usageEnabled() {
+		go startUsageLoop(context.Background(), USAGE_PUSH_INTERVAL)
+	}
 
 	// Log configuration
 	log.Printf("Starting WireGuard API server...")
@@ -301,6 +304,11 @@ func main() {
 	log.Printf("Debug mode: %v", DEBUG_MODE)
 	log.Printf("UDP 443 client endpoint mode: %v", USE_UDP_443_ENDPOINT)
 	log.Printf("AmneziaWG profile: %s", AWG_PROFILE)
+	if usageEnabled() {
+		log.Printf("Usage push: on, host %s, every %s, state file %s", usageURLHost(), USAGE_PUSH_INTERVAL, USAGE_STATE_FILE)
+	} else {
+		log.Printf("Usage push: off")
+	}
 
 	// Set Gin to release mode in production
 	if !DEBUG_MODE {
