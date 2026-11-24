@@ -177,6 +177,28 @@ func TestFailedSendKeepsLimits(t *testing.T) {
 	}
 }
 
+func TestAnswerWithoutLimitsLeavesAppliedLimits(t *testing.T) {
+	dir := setupNft(t)
+	setupUsage(t)
+	x := []nodeLimit{{AllowedIP: "10.66.0.61", RateKbps: 256}}
+	newFakeMaster(t, `{"ok":true,"limits":[{"allowed_ip":"10.66.0.61","rate_kbps":256}]}`, 200)
+	usageTick(time.Now())
+	m := newFakeMaster(t, `{"ok":true}`, 200)
+	usageTick(time.Now())
+	if m.count() != 1 {
+		t.Fatalf("second master requests = %d", m.count())
+	}
+	if s := nftScripts(t, dir); len(s) != 1 {
+		t.Fatalf("nft calls = %d, want the limits left alone", len(s))
+	}
+	limitsMu.Lock()
+	same := appliedScript == buildLimitScript(x, nil)
+	limitsMu.Unlock()
+	if !same {
+		t.Fatal("applied set changed")
+	}
+}
+
 func TestNftFailureRetriedNextTick(t *testing.T) {
 	dir := setupNft(t)
 	x := []nodeLimit{{AllowedIP: "10.66.0.61", RateKbps: 256}}

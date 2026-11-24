@@ -635,6 +635,7 @@ func TestLimitsFromLastAnswer(t *testing.T) {
 func TestUndecodable200AcknowledgesButNotOK(t *testing.T) {
 	setupUsage(t)
 	newFakeMaster(t, `not json`, 200)
+	logs := captureLog(t)
 	seedPending(1)
 	_, ok := pushPending(time.Now())
 	if ok {
@@ -642,6 +643,46 @@ func TestUndecodable200AcknowledgesButNotOK(t *testing.T) {
 	}
 	if got := pendingIDs(); len(got) != 0 {
 		t.Fatalf("Pending = %v", got)
+	}
+	if n := strings.Count(logs.String(), "not valid JSON"); n != 1 {
+		t.Fatalf("log = %q, want one line", logs.String())
+	}
+}
+
+func TestOKFalse200LogsAndKeepsLimits(t *testing.T) {
+	setupUsage(t)
+	newFakeMaster(t, `{"ok":false,"limits":[]}`, 200)
+	logs := captureLog(t)
+	seedPending(1)
+	if _, ok := pushPending(time.Now()); ok {
+		t.Fatal("ok = true for ok:false")
+	}
+	if got := pendingIDs(); len(got) != 0 {
+		t.Fatalf("Pending = %v", got)
+	}
+	if n := strings.Count(logs.String(), "ok:false"); n != 1 {
+		t.Fatalf("log = %q, want one ok:false line", logs.String())
+	}
+}
+
+func TestAnswerWithoutLimitsKeyKeepsLimits(t *testing.T) {
+	setupUsage(t)
+	newFakeMaster(t, `{"ok":true}`, 200)
+	seedPending(1)
+	if limits, ok := pushPending(time.Now()); ok {
+		t.Fatalf("ok = true without a limits key (limits=%v)", limits)
+	}
+	if got := pendingIDs(); len(got) != 0 {
+		t.Fatalf("Pending = %v, the batch was accepted", got)
+	}
+}
+
+func TestAnswerWithEmptyLimitsRemovesAll(t *testing.T) {
+	setupUsage(t)
+	newFakeMaster(t, `{"ok":true,"limits":[]}`, 200)
+	seedPending(1)
+	if limits, ok := pushPending(time.Now()); !ok || len(limits) != 0 {
+		t.Fatalf("limits=%v ok=%v, want an empty list that counts", limits, ok)
 	}
 }
 

@@ -441,8 +441,10 @@ type nodeLimit struct {
 }
 
 type usageAnswer struct {
-	OK     bool        `json:"ok"`
-	Limits []nodeLimit `json:"limits"`
+	OK bool `json:"ok"`
+	// Limits is nil when the answer has no limits key (unknown: keep the
+	// current limits); an empty list means no limits.
+	Limits *[]nodeLimit `json:"limits"`
 }
 
 func newBatchID() string {
@@ -533,8 +535,16 @@ func sendBatch(b usageBatch) (int, *usageAnswer) {
 		return resp.StatusCode, nil
 	}
 	var ans usageAnswer
-	if err := json.Unmarshal(data, &ans); err != nil || !ans.OK {
+	if err := json.Unmarshal(data, &ans); err != nil {
+		log.Printf("usage push: master answered 200 with a body that is not valid JSON, limits unchanged")
 		return resp.StatusCode, nil
+	}
+	if !ans.OK {
+		log.Printf("usage push: master answered 200 with ok:false, limits unchanged")
+		return resp.StatusCode, nil
+	}
+	if ans.Limits == nil {
+		log.Printf("usage push: master answered 200 without limits, limits unchanged")
 	}
 	return resp.StatusCode, &ans
 }
@@ -568,8 +578,8 @@ func pushPending(now time.Time) (limits []nodeLimit, ok bool) {
 		status, ans := sendBatch(b)
 		if status == http.StatusOK {
 			done[b.BatchID] = true
-			if ans != nil {
-				limits, ok = ans.Limits, true
+			if ans != nil && ans.Limits != nil {
+				limits, ok = *ans.Limits, true
 			}
 			continue
 		}
