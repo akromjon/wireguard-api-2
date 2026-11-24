@@ -85,6 +85,24 @@ func TestLimitCoversPeerIPv6(t *testing.T) {
 	}
 }
 
+func TestLimitScriptWritesMappedAsIPv4(t *testing.T) {
+	got := buildLimitScript([]nodeLimit{{AllowedIP: "10.66.0.61", RateKbps: 256}, {AllowedIP: "::ffff:10.66.0.9", RateKbps: 256}},
+		[]peerReading{{PublicKey: "pubA", AllowedIPs: []string{"::ffff:10.66.0.61", "fd42:42:42::3d"}}})
+	if strings.Contains(got, "::ffff") {
+		t.Fatalf("mapped address in script:\n%s", got)
+	}
+	for _, want := range []string{
+		"    ip daddr 10.66.0.61 limit rate over 32000 bytes/second burst 64000 bytes drop\n",
+		"    ip saddr 10.66.0.61 limit rate over 32000 bytes/second burst 64000 bytes drop\n",
+		"    ip6 daddr fd42:42:42::3d limit",
+		"    ip daddr 10.66.0.9 limit",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q in:\n%s", want, got)
+		}
+	}
+}
+
 func TestLimitUnknownPeerAndZeroRate(t *testing.T) {
 	got := buildLimitScript([]nodeLimit{{AllowedIP: "10.66.0.9", RateKbps: 0}}, nil)
 	if !strings.Contains(got, "ip daddr 10.66.0.9 limit rate over 32000 bytes/second burst 64000 bytes drop") {

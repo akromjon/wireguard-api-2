@@ -143,10 +143,24 @@ func parseDump(out string) (ifacePub string, peers []peerReading) {
 	return ifacePub, peers
 }
 
+// normIP returns the canonical text of an address and whether it is IPv4.
+// An IPv4-mapped IPv6 address (::ffff:10.66.0.61) counts as IPv4 and comes
+// back as 10.66.0.61. Text that is not an address gives "".
+func normIP(s string) (addr string, v4 bool) {
+	ip := net.ParseIP(s)
+	if ip == nil {
+		return "", false
+	}
+	if four := ip.To4(); four != nil {
+		return four.String(), true
+	}
+	return ip.String(), false
+}
+
 func firstIPv4(ips []string) string {
 	for _, s := range ips {
-		if ip := net.ParseIP(s); ip != nil && ip.To4() != nil {
-			return s
+		if addr, v4 := normIP(s); v4 {
+			return addr
 		}
 	}
 	return ""

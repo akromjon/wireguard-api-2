@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"net"
 	"os/exec"
 	"sort"
 	"strings"
@@ -38,7 +37,9 @@ func limitRemoveScript() string {
 
 // buildLimitScript renders the whole table. Each limited IPv4 is mapped to its
 // peer and every allowed-ip of that peer is limited; a limit that matches no
-// peer is applied for that IPv4 alone. Output is deterministic.
+// peer is applied for that IPv4 alone. IPv4-mapped IPv6 addresses are written
+// as plain IPv4 (an `ip` rule never gets a mapped address). Output is
+// deterministic.
 func buildLimitScript(limits []nodeLimit, peers []peerReading) string {
 	if len(limits) == 0 {
 		return limitRemoveScript()
@@ -55,11 +56,15 @@ func buildLimitScript(limits []nodeLimit, peers []peerReading) string {
 			rate = 256
 		}
 		bps := rate * 1000 / 8
+		want, _ := normIP(l.AllowedIP)
+		if want == "" {
+			continue
+		}
 		addrs := []string{l.AllowedIP}
 		for _, p := range peers {
 			found := false
 			for _, a := range p.AllowedIPs {
-				if a == l.AllowedIP {
+				if n, _ := normIP(a); n == want {
 					found = true
 					break
 				}
@@ -69,17 +74,19 @@ func buildLimitScript(limits []nodeLimit, peers []peerReading) string {
 				break
 			}
 		}
+		seen := map[string]bool{}
 		for _, a := range addrs {
-			ip := net.ParseIP(a)
-			if ip == nil {
+			addr, v4 := normIP(a)
+			if addr == "" || seen[addr] {
 				continue
 			}
+			seen[addr] = true
 			fam := "ip6"
-			if ip.To4() != nil {
+			if v4 {
 				fam = "ip"
 			}
 			for _, dir := range []string{"daddr", "saddr"} {
-				fmt.Fprintf(&b, "    %s %s %s limit rate over %d bytes/second burst %d bytes drop\n", fam, dir, a, bps, 2*bps)
+				fmt.Fprintf(&b, "    %s %s %s limit rate over %d bytes/second burst %d bytes drop\n", fam, dir, addr, bps, 2*bps)
 			}
 		}
 	}

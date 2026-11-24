@@ -202,6 +202,20 @@ func TestAllowedIPTakesFirstIPv4(t *testing.T) {
 	}
 }
 
+func TestMappedIPv4SentAsPlainIPv4(t *testing.T) {
+	if got := firstIPv4([]string{"fd42:42:42::3d", "::ffff:10.66.0.61"}); got != "10.66.0.61" {
+		t.Fatalf("firstIPv4 = %q", got)
+	}
+	env := setupUsage(t)
+	env.setDump(t, dumpPeer{"pubA", "fd42:42:42::3d/128,::ffff:10.66.0.61/128", 1, 1})
+	mustCollect(t)
+	env.setDump(t, dumpPeer{"pubA", "fd42:42:42::3d/128,::ffff:10.66.0.61/128", 2, 2})
+	mustCollect(t)
+	if got := snapshot().Open["pubA"].AllowedIP; got != "10.66.0.61" {
+		t.Fatalf("AllowedIP = %q", got)
+	}
+}
+
 func TestPeerWithoutIPv4NotSent(t *testing.T) {
 	env := setupUsage(t)
 	env.setDump(t, dumpPeer{"pubA", "fd42:42:42::3d/128", 0, 0})
