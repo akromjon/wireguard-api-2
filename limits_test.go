@@ -14,6 +14,7 @@ dir="$(dirname "$0")"
 n=$(ls "$dir"/nft_in_* 2>/dev/null | wc -l)
 cat > "$dir/nft_in_$((n+1))"
 if [ -f "$dir/nft_fail" ]; then echo "fake nft failure" >&2; exit 1; fi
+if [ -f "$dir/nft_hang" ]; then exec sleep 30; fi
 `
 
 // setupNft points nftCmd at a fake and resets the applied state.
@@ -160,6 +161,28 @@ func TestNftFailureRetriedNextTick(t *testing.T) {
 	}
 	if s := nftScripts(t, dir); len(s) != 2 {
 		t.Fatalf("nft calls after success = %d", len(s))
+	}
+}
+
+func TestHungNftIsKilled(t *testing.T) {
+	dir := setupNft(t)
+	old := nftTimeout
+	nftTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { nftTimeout = old })
+	os.WriteFile(filepath.Join(dir, "nft_hang"), nil, 0600)
+	start := time.Now()
+	err := applyLimits([]nodeLimit{{AllowedIP: "10.66.0.61", RateKbps: 256}})
+	if err == nil || !strings.Contains(err.Error(), "no answer") {
+		t.Fatalf("err = %v", err)
+	}
+	if d := time.Since(start); d > 10*time.Second {
+		t.Fatalf("applyLimits took %v", d)
+	}
+	limitsMu.Lock()
+	applied := appliedOnce
+	limitsMu.Unlock()
+	if applied {
+		t.Fatal("a killed nft run counted as applied")
 	}
 }
 

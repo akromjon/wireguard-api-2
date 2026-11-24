@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"log"
 	"net"
@@ -9,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Speed limits: the master's push answer lists peers to slow down. They are
@@ -21,6 +23,8 @@ const limitTable = "inet chop_fairuse"
 var (
 	// nftCmd is the nft binary; tests point it at a fake.
 	nftCmd = "nft"
+	// nftTimeout bounds one nft run, so a hung nft cannot stop the push loop.
+	nftTimeout = 15 * time.Second
 
 	limitsMu      sync.Mutex // guards the three vars below, never held with usageMu
 	appliedScript string
@@ -99,13 +103,21 @@ func applyLimits(limits []nodeLimit) error {
 	if appliedOnce && script == appliedScript {
 		return nil
 	}
-	cmd := exec.Command(nftCmd, "-f", "-")
+	ctx, cancel := context.WithTimeout(context.Background(), nftTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, nftCmd, "-f", "-")
 	cmd.Stdin = strings.NewReader(script)
 	var out bytes.Buffer
 	cmd.Stderr = &out
 	cmd.Stdout = &out
 	if err := cmd.Run(); err != nil {
-		msg := fmt.Sprintf("nft failed: %v: %s", err, strings.TrimSpace(out.String()))
+		if ctx.Err() == context.DeadlineExceeded {
+			err = fmt.Errorf("no answer in %s, killed", nftTimeout)
+		}
+		msg := fmt.Sprintf("nft failed: %v", err)
+		if o := strings.TrimSpace(out.String()); o != "" {
+			msg += ": " + o
+		}
 		if msg != lastLimitErr {
 			lastLimitErr = msg
 			log.Printf("usage push: %s", msg)
