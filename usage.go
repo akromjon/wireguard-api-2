@@ -405,8 +405,16 @@ func collectUsageLogged() {
 
 const maxPendingBatches = 2000
 
-// usageHTTPClient sends the batches; tests swap it.
-var usageHTTPClient = &http.Client{Timeout: 10 * time.Second}
+// usageHTTPClient sends the batches. It follows no redirect: a 301/302
+// would turn the POST into a GET (the batch is lost) and a redirect to
+// another host would carry the key header there. A 3xx is kept and logged
+// like any other answer that is not 200.
+var usageHTTPClient = &http.Client{
+	Timeout: 10 * time.Second,
+	CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	},
+}
 
 // nodeLimit is one per-peer rate limit the master asks for.
 type nodeLimit struct {
@@ -454,6 +462,15 @@ func sealOpenBatch(now time.Time) {
 		log.Printf("usage push: outbox full, dropped %d oldest batches", over)
 	}
 	markUsageChangedLocked()
+}
+
+// usageURLWarning is a startup warning for a USAGE_PUSH_URL that is not
+// https, or "" when it is.
+func usageURLWarning() string {
+	if u, err := url.Parse(USAGE_PUSH_URL); err == nil && strings.EqualFold(u.Scheme, "https") {
+		return ""
+	}
+	return "Usage push: warning: USAGE_PUSH_URL is not https, the API key is sent unencrypted"
 }
 
 func usageURLHost() string {

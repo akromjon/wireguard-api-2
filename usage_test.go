@@ -817,6 +817,81 @@ func TestStaleTempFilesRemovedOnLoad(t *testing.T) {
 	}
 }
 
+func TestRedirect301KeepsBatchAndSendsNoGET(t *testing.T) {
+	setupUsage(t)
+	var mu sync.Mutex
+	var seen []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen = append(seen, r.Method+" "+r.URL.Path)
+		mu.Unlock()
+		if r.URL.Path == "/old" {
+			http.Redirect(w, r, "/new", http.StatusMovedPermanently)
+			return
+		}
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		io.WriteString(w, `{"ok":true,"limits":[]}`)
+	}))
+	defer srv.Close()
+	USAGE_PUSH_URL = srv.URL + "/old"
+	ids := seedPending(1)
+	if _, ok := pushPending(time.Now()); ok {
+		t.Fatal("ok = true on a 301")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) != 1 || seen[0] != "POST /old" {
+		t.Fatalf("requests = %v, want only POST /old", seen)
+	}
+	if got := pendingIDs(); len(got) != 1 || got[0] != ids[0] {
+		t.Fatalf("Pending = %v, want the batch kept", got)
+	}
+}
+
+func TestRedirect307ToOtherHostNotFollowed(t *testing.T) {
+	setupUsage(t)
+	var mu sync.Mutex
+	var otherSaw []string
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		otherSaw = append(otherSaw, r.Method+" key="+r.Header.Get("key"))
+		mu.Unlock()
+		io.WriteString(w, `{"ok":true,"limits":[]}`)
+	}))
+	defer other.Close()
+	otherURL := strings.Replace(other.URL, "127.0.0.1", "localhost", 1)
+	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, otherURL+"/x", http.StatusTemporaryRedirect)
+	}))
+	defer first.Close()
+	USAGE_PUSH_URL = first.URL + "/node-usage"
+	ids := seedPending(1)
+	pushPending(time.Now())
+	mu.Lock()
+	defer mu.Unlock()
+	if len(otherSaw) != 0 {
+		t.Fatalf("other host got %v", otherSaw)
+	}
+	if got := pendingIDs(); len(got) != 1 || got[0] != ids[0] {
+		t.Fatalf("Pending = %v, want the batch kept", got)
+	}
+}
+
+func TestUsageURLWarning(t *testing.T) {
+	setupUsage(t)
+	USAGE_PUSH_URL = "https://master.example/node-usage"
+	if w := usageURLWarning(); w != "" {
+		t.Fatalf("https warned: %q", w)
+	}
+	USAGE_PUSH_URL = "http://master.example/node-usage"
+	if w := usageURLWarning(); !strings.Contains(w, "not https") {
+		t.Fatalf("http not warned: %q", w)
+	}
+}
+
 func TestPendingSurvivesRestart(t *testing.T) {
 	env := setupUsage(t)
 	m := newFakeMaster(t, "", 503)

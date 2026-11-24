@@ -306,6 +306,9 @@ func main() {
 	log.Printf("AmneziaWG profile: %s", AWG_PROFILE)
 	if usageEnabled() {
 		log.Printf("Usage push: on, host %s, every %s, state file %s", usageURLHost(), USAGE_PUSH_INTERVAL, USAGE_STATE_FILE)
+		if w := usageURLWarning(); w != "" {
+			log.Print(w)
+		}
 	} else {
 		log.Printf("Usage push: off")
 	}
