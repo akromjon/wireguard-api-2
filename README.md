@@ -243,6 +243,81 @@ time to the node.
   installer only keeps API ports free. Choose a port no AWG interface uses.
 - `/api/stats` reports `echo_replies_total`.
 
+## Usage push (optional)
+
+The node can report how many bytes each client moved and receive a list of
+clients to slow down. It is off unless `USAGE_PUSH_URL` is set in the node
+`.env`. When it is off there is no background loop, no state file and no
+`nft` call.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `USAGE_PUSH_URL` | empty (off) | Full URL the node posts to, for example `https://master.example/node-usage`. |
+| `USAGE_PUSH_INTERVAL_SECONDS` | `120` | Seconds between pushes. Values below `30` are raised to `30`. |
+| `USAGE_STATE_FILE` | `/var/lib/wireguard-api/usage-state.json` | Where the node keeps its last counters and unsent batches, so a restart loses nothing. |
+
+Every interval the node reads the kernel counters of each peer and posts the
+change since the previous batch. The request carries the `key` header with the
+node API token:
+
+```text
+POST https://master.example/node-usage
+key: your-api-token
+Content-Type: application/json
+
+{"batch_id":"<uuid v4>","sent_at":"2026-01-01T00:00:00Z","peers":[{"public_key":"<base64>","allowed_ip":"10.66.0.61","rx_bytes":123,"tx_bytes":456}]}
+```
+
+- `rx_bytes` is what the client sent to the node, `tx_bytes` is what the node
+  sent to the client. Both are byte deltas since the previous batch.
+- Only peers with some traffic are listed. `peers` may be `[]`, which works as
+  a heartbeat.
+- `allowed_ip` is the peer's first IPv4 allowed-ip without `/32`.
+
+The answer on success is `200` with:
+
+```json
+{"ok":true,"limits":[{"allowed_ip":"10.66.0.61","rate_kbps":256}]}
+```
+
+Delivery rules:
+
+- `200`: the batch is dropped and the limits are applied.
+- `404`, `429`, any `5xx`, a timeout or a network error: the batch is kept on
+  disk and sending stops until the next interval.
+- Any other `4xx`: the batch is dropped and a line is logged, so a payload the
+  server will never accept cannot block the queue.
+
+### Speed limits
+
+`limits` is the full list of peers that should be slow right now. An empty list
+means no limits. The node turns it into nftables rules in its own table,
+`inet chop_fairuse` (chain `forward`, hook `forward`, priority `-5`). For each
+limited peer it adds a rule per direction and per address, IPv4 and IPv6,
+that drops traffic above the rate:
+
+```text
+ip daddr 10.66.0.61 limit rate over 32000 bytes/second burst 64000 bytes drop
+ip saddr 10.66.0.61 limit rate over 32000 bytes/second burst 64000 bytes drop
+```
+
+The rate in bytes per second is `rate_kbps * 1000 / 8`, and the burst is twice
+that. Check it with:
+
+```bash
+nft list table inet chop_fairuse
+```
+
+The node touches only this table. It never flushes the ruleset, never edits
+`/etc/nftables.conf` and never enables a service. Limits live in memory: after
+a restart the table stays as it was until the next answer replaces it.
+
+### Turn it off
+
+1. Remove `USAGE_PUSH_URL` from `.env` (or leave it empty).
+2. Restart the API: `systemctl restart wireguard.service`.
+3. Delete the table if it is there: `nft delete table inet chop_fairuse`.
+
 ## Build and test
 
 ```bash
