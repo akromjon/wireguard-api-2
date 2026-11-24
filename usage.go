@@ -58,10 +58,16 @@ type peerCounter struct {
 }
 
 type usageState struct {
-	Primed  bool                   `json:"primed"`
-	Last    map[string]peerCounter `json:"last"`
-	Open    map[string]usageEntry  `json:"open"`
-	Pending []usageBatch           `json:"pending"`
+	Primed bool `json:"primed"`
+	// Iface is the interface name and its public key at the last reading.
+	// Counters read on another interface (or a re-created one) are not
+	// comparable with Last.
+	Iface string `json:"iface"`
+	// CollectedAt is the time of the last successful reading.
+	CollectedAt time.Time              `json:"collected_at"`
+	Last        map[string]peerCounter `json:"last"`
+	Open        map[string]usageEntry  `json:"open"`
+	Pending     []usageBatch           `json:"pending"`
 }
 
 type peerReading struct {
@@ -77,13 +83,19 @@ func newUsageState() usageState {
 }
 
 // parseDump parses `<wg|awg> show <nic> dump`. The first line is the
-// interface; peer lines are tab separated:
+// interface (private key, public key, port, ...); it returns that public key.
+// Peer lines are tab separated:
 // pubkey psk endpoint allowed-ips handshake rx tx keepalive
-func parseDump(out string) []peerReading {
-	var peers []peerReading
+func parseDump(out string) (ifacePub string, peers []peerReading) {
 	lines := strings.Split(strings.TrimSpace(out), "\n")
 	for i, line := range lines {
-		if i == 0 || strings.TrimSpace(line) == "" {
+		if i == 0 {
+			if f := strings.Split(strings.TrimRight(line, "\r"), "\t"); len(f) >= 2 {
+				ifacePub = f[1]
+			}
+			continue
+		}
+		if strings.TrimSpace(line) == "" {
 			continue
 		}
 		f := strings.Split(strings.TrimRight(line, "\r"), "\t")
@@ -110,7 +122,7 @@ func parseDump(out string) []peerReading {
 		}
 		peers = append(peers, p)
 	}
-	return peers
+	return ifacePub, peers
 }
 
 func firstIPv4(ips []string) string {
@@ -120,6 +132,19 @@ func firstIPv4(ips []string) string {
 		}
 	}
 	return ""
+}
+
+// usageStaleAfter is how old the last reading may be before the next one is
+// taken as a new baseline instead of a delta: a longer gap means the API was
+// down or the feature was off, and the counters moved by an unknown amount
+// that may not belong to the current holders. Two intervals at least, so a
+// long USAGE_PUSH_INTERVAL_SECONDS does not re-baseline every tick.
+func usageStaleAfter() time.Duration {
+	d := 30 * time.Minute
+	if 2*USAGE_PUSH_INTERVAL > d {
+		d = 2 * USAGE_PUSH_INTERVAL
+	}
+	return d
 }
 
 func counterDelta(cur, last uint64) uint64 {
@@ -212,12 +237,27 @@ func collectUsage() error {
 	if success != "success" {
 		return fmt.Errorf("%s show dump failed: %s", wgCmd, out)
 	}
-	peers := parseDump(out)
+	ifacePub, peers := parseDump(out)
+	iface := wgParams.ServerWGNIC + " " + ifacePub
+	now := time.Now()
+
+	// count is false when this reading only sets the baseline. Open and
+	// Pending stay: they hold deltas that were measured correctly.
+	count := usageSt.Primed
+	if count {
+		if usageSt.Iface != iface {
+			log.Printf("usage meter: interface %s is not the one of the last reading, taking a new baseline", wgParams.ServerWGNIC)
+			count = false
+		} else if gap := now.Sub(usageSt.CollectedAt); gap > usageStaleAfter() {
+			log.Printf("usage meter: last reading is %s old, taking a new baseline", gap.Round(time.Second))
+			count = false
+		}
+	}
 
 	last := make(map[string]peerCounter, len(peers))
 	for _, p := range peers {
 		last[p.PublicKey] = peerCounter{RX: p.RX, TX: p.TX}
-		if !usageSt.Primed {
+		if !count {
 			continue
 		}
 		prev, known := usageSt.Last[p.PublicKey]
@@ -243,6 +283,8 @@ func collectUsage() error {
 	}
 	usageSt.Last = last
 	usageSt.Primed = true
+	usageSt.Iface = iface
+	usageSt.CollectedAt = now
 	lastPeers = peers
 
 	return saveUsageState()

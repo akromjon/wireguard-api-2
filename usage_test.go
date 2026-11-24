@@ -23,8 +23,13 @@ type dumpPeer struct {
 }
 
 func dumpText(peers ...dumpPeer) string {
+	return dumpTextIface("srvpub", peers...)
+}
+
+// dumpTextIface is dumpText with a chosen interface public key.
+func dumpTextIface(ifacePub string, peers ...dumpPeer) string {
 	var b strings.Builder
-	b.WriteString("srvpriv\tsrvpub\t51820\toff\n")
+	b.WriteString("srvpriv\t" + ifacePub + "\t51820\toff\n")
 	for _, p := range peers {
 		fmt.Fprintf(&b, "%s\t(none)\t203.0.113.7:4000\t%s\t1700000000\t%d\t%d\toff\n", p.key, p.allowed, p.rx, p.tx)
 	}
@@ -55,7 +60,12 @@ func resetUsageMemory() {
 
 func (e *testEnv) setDump(t *testing.T, peers ...dumpPeer) {
 	t.Helper()
-	if err := os.WriteFile(filepath.Join(e.dir, "show_output"), []byte(dumpText(peers...)), 0600); err != nil {
+	e.setDumpIface(t, "srvpub", peers...)
+}
+
+func (e *testEnv) setDumpIface(t *testing.T, ifacePub string, peers ...dumpPeer) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(e.dir, "show_output"), []byte(dumpTextIface(ifacePub, peers...)), 0600); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -204,7 +214,10 @@ func TestParseDump(t *testing.T) {
 		dumpPeer{"pubA", "10.66.0.61/32,fd42:42:42::3d/128", 5, 6},
 		dumpPeer{"pubB", "(none)", 7, 8})
 	// dumpText already writes (none) for psk; allowed-ips "(none)" is the field under test.
-	got := parseDump(out)
+	pub, got := parseDump(out)
+	if pub != "srvpub" {
+		t.Fatalf("interface key = %q", pub)
+	}
 	if len(got) != 2 {
 		t.Fatalf("got %d peers", len(got))
 	}
@@ -213,6 +226,93 @@ func TestParseDump(t *testing.T) {
 	}
 	if len(got[1].AllowedIPs) != 0 {
 		t.Fatalf("peer 1 = %+v", got[1])
+	}
+}
+
+// setCollectedAt moves the time of the last reading.
+func setCollectedAt(at time.Time) {
+	usageMu.Lock()
+	defer usageMu.Unlock()
+	usageSt.CollectedAt = at
+}
+
+func TestInterfaceKeyChangeTakesNewBaseline(t *testing.T) {
+	env := setupUsage(t)
+	env.setDump(t, dumpPeer{"pubA", "10.66.0.61/32", 5000, 9000})
+	mustCollect(t)
+	env.setDump(t, dumpPeer{"pubA", "10.66.0.61/32", 6000, 9000})
+	mustCollect(t)
+	// Same peer key, interface re-created with another key: its counters
+	// are not comparable with the old ones.
+	env.setDumpIface(t, "otherpub", dumpPeer{"pubA", "10.66.0.61/32", 90000, 90000})
+	mustCollect(t)
+	st := snapshot()
+	if got := st.Open["pubA"]; got.RX != 1000 || got.TX != 0 {
+		t.Fatalf("Open[pubA] = %+v, want only the earlier 1000 rx", got)
+	}
+	if st.Last["pubA"] != (peerCounter{90000, 90000}) || st.Iface != "wg0 otherpub" {
+		t.Fatalf("state = %+v", st)
+	}
+	env.setDumpIface(t, "otherpub", dumpPeer{"pubA", "10.66.0.61/32", 90500, 90000})
+	mustCollect(t)
+	if got := snapshot().Open["pubA"].RX; got != 1500 {
+		t.Fatalf("Open[pubA].RX = %d, want 1500 after the new baseline", got)
+	}
+}
+
+func TestLongGapTakesNewBaseline(t *testing.T) {
+	env := setupUsage(t)
+	env.setDump(t, dumpPeer{"pubA", "10.66.0.61/32", 5000, 9000})
+	mustCollect(t)
+	env.setDump(t, dumpPeer{"pubA", "10.66.0.61/32", 6000, 9000})
+	mustCollect(t)
+	setCollectedAt(time.Now().Add(-31 * time.Minute))
+	env.setDump(t,
+		dumpPeer{"pubA", "10.66.0.61/32", 50 << 30, 9000},
+		dumpPeer{"pubB", "10.66.0.62/32", 30 << 30, 0})
+	mustCollect(t)
+	st := snapshot()
+	if got := st.Open["pubA"]; got.RX != 1000 {
+		t.Fatalf("Open[pubA] = %+v, want only the earlier 1000 rx", got)
+	}
+	if _, ok := st.Open["pubB"]; ok {
+		t.Fatalf("peer first seen after the gap was counted: %+v", st.Open["pubB"])
+	}
+	if st.Last["pubB"] != (peerCounter{30 << 30, 0}) {
+		t.Fatalf("Last = %+v", st.Last)
+	}
+	if time.Since(st.CollectedAt) > time.Minute {
+		t.Fatalf("CollectedAt not updated: %v", st.CollectedAt)
+	}
+}
+
+func TestShortGapCountsDeltas(t *testing.T) {
+	env := setupUsage(t)
+	env.setDump(t, dumpPeer{"pubA", "10.66.0.61/32", 5000, 9000})
+	mustCollect(t)
+	setCollectedAt(time.Now().Add(-29 * time.Minute))
+	env.setDump(t, dumpPeer{"pubA", "10.66.0.61/32", 6000, 9500})
+	mustCollect(t)
+	if got := snapshot().Open["pubA"]; got.RX != 1000 || got.TX != 500 {
+		t.Fatalf("Open[pubA] = %+v", got)
+	}
+}
+
+func TestStaleStateFileNotCounted(t *testing.T) {
+	env := setupUsage(t)
+	// State left behind weeks ago (feature off, or the API down).
+	old := usageState{Primed: true, Iface: "wg0 srvpub", CollectedAt: time.Now().Add(-21 * 24 * time.Hour),
+		Last: map[string]peerCounter{"pubA": {RX: 1 << 30}}, Open: map[string]usageEntry{}}
+	data, _ := json.Marshal(old)
+	if err := os.WriteFile(USAGE_STATE_FILE, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	env.setDump(t,
+		dumpPeer{"pubA", "10.66.0.61/32", 50 << 30, 0},
+		dumpPeer{"pubB", "10.66.0.62/32", 30 << 30, 0})
+	mustCollect(t)
+	if st := snapshot(); len(st.Open) != 0 {
+		t.Fatalf("Open = %+v, want nothing from a stale state", st.Open)
 	}
 }
 
