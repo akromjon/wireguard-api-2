@@ -263,6 +263,15 @@ func loadEnv() {
 	SPARE_POOL, sparePoolAuto = parseSparePoolSetting(getEnv("SPARE_POOL", "0"))
 	USE_UDP_443_ENDPOINT = strings.EqualFold(getEnv("USE_UDP_443_ENDPOINT", "false"), "true")
 	AWG_PROFILE = strings.ToLower(getEnv("AWG_PROFILE", "awg2"))
+	USAGE_PUSH_URL = getEnv("USAGE_PUSH_URL", "")
+	USAGE_STATE_FILE = getEnv("USAGE_STATE_FILE", "/var/lib/wireguard-api/usage-state.json")
+	USAGE_PUSH_INTERVAL = 120 * time.Second
+	if secs, err := strconv.Atoi(getEnv("USAGE_PUSH_INTERVAL_SECONDS", "120")); err == nil {
+		if secs < 30 {
+			secs = 30
+		}
+		USAGE_PUSH_INTERVAL = time.Duration(secs) * time.Second
+	}
 
 	// Detect backend type (this will set WG_CONFIG_FILE and WG_PARAMS_FILE)
 	detectBackend()
@@ -2103,6 +2112,7 @@ func wireGuardStartHandlerGin(c *gin.Context) {
 func wireGuardStopHandlerGin(c *gin.Context) {
 	// Use systemctl to stop the service
 	serviceName := wgServicePrefix + wgParams.ServerWGNIC
+	collectUsageLogged()
 	success, output := executeCommand("systemctl", "stop", serviceName)
 
 	if success != "success" {
@@ -2124,6 +2134,7 @@ func wireGuardStopHandlerGin(c *gin.Context) {
 func wireGuardRestartHandlerGin(c *gin.Context) {
 	// Use systemctl to restart the service
 	serviceName := wgServicePrefix + wgParams.ServerWGNIC
+	collectUsageLogged()
 	success, output := executeCommand("systemctl", "restart", serviceName)
 
 	if success != "success" {

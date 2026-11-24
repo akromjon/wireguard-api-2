@@ -94,6 +94,9 @@ func sparePath(name string) string {
 // syncWireGuardConf applies the whole server config to the kernel and records
 // whether that worked. Callers hold wgConfigMutex.
 func syncWireGuardConf() error {
+	// Save the byte counters before peers can vanish from the kernel. A meter
+	// failure never blocks an apply.
+	collectUsageLogged()
 	err := syncWireGuardConfRun()
 	lastApplyOK = err == nil
 	if err == nil {
