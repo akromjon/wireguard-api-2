@@ -892,6 +892,24 @@ func TestUsageURLWarning(t *testing.T) {
 	}
 }
 
+func TestSendsCappedPerTick(t *testing.T) {
+	setupUsage(t)
+	m := newFakeMaster(t, `{"ok":true,"limits":[]}`, 200)
+	ids := seedPending(40)
+	pushPending(time.Now())
+	if m.count() != 30 {
+		t.Fatalf("requests = %d, want 30", m.count())
+	}
+	got := pendingIDs()
+	if len(got) != 10 || got[0] != ids[30] || got[9] != ids[39] {
+		t.Fatalf("Pending = %v, want the 10 newest", got)
+	}
+	pushPending(time.Now())
+	if m.count() != 40 || len(pendingIDs()) != 0 {
+		t.Fatalf("second round: requests = %d, Pending = %v", m.count(), pendingIDs())
+	}
+}
+
 func TestPendingSurvivesRestart(t *testing.T) {
 	env := setupUsage(t)
 	m := newFakeMaster(t, "", 503)

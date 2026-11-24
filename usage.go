@@ -405,6 +405,10 @@ func collectUsageLogged() {
 
 const maxPendingBatches = 2000
 
+// maxSendsPerTick caps the requests of one tick, so a backlog drains over
+// several ticks instead of in one burst on the master.
+const maxSendsPerTick = 30
+
 // usageHTTPClient sends the batches. It follows no redirect: a 301/302
 // would turn the POST into a GET (the batch is lost) and a redirect to
 // another host would carry the key header there. A 3xx is kept and logged
@@ -522,15 +526,19 @@ func sendBatch(b usageBatch) (int, *usageAnswer) {
 }
 
 // pushPending saves the state, then sends the outbox oldest-first, one
-// request per batch. When the save fails it sends only a heartbeat and keeps
-// the outbox in memory. It never holds usageMu during HTTP. limits/ok come
+// request per batch, at most maxSendsPerTick. When the save fails it sends
+// only a heartbeat and keeps the outbox in memory. It never holds usageMu during HTTP. limits/ok come
 // from the last 200 answer that decoded; ok=false leaves the limits unchanged.
 func pushPending(now time.Time) (limits []nodeLimit, ok bool) {
 	var batches []usageBatch
 	if saveUsageState() == nil {
 		// Only the push loop changes Pending, so this is what was saved.
 		usageMu.Lock()
-		batches = append([]usageBatch(nil), usageSt.Pending...)
+		n := len(usageSt.Pending)
+		if n > maxSendsPerTick {
+			n = maxSendsPerTick
+		}
+		batches = append([]usageBatch(nil), usageSt.Pending[:n]...)
 		usageMu.Unlock()
 	}
 
