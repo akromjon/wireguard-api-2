@@ -252,9 +252,9 @@ clients to slow down. It is off unless `USAGE_PUSH_URL` is set in the node
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `USAGE_PUSH_URL` | empty (off) | Full URL the node posts to, for example `https://master.example/node-usage`. |
-| `USAGE_PUSH_INTERVAL_SECONDS` | `120` | Seconds between pushes. Values below `30` are raised to `30`. |
-| `USAGE_STATE_FILE` | `/var/lib/wireguard-api/usage-state.json` | Where the node keeps its last counters and unsent batches, so a restart loses nothing. |
+| `USAGE_PUSH_URL` | empty (off) | Full URL the node posts to, for example `https://master.example/node-usage`. Use `https`: the node logs a warning at startup when it is not. |
+| `USAGE_PUSH_INTERVAL_SECONDS` | `120` | Seconds between pushes. Values below `30` are raised to `30`; a value that is not a number gives `120`. |
+| `USAGE_STATE_FILE` | `/var/lib/wireguard-api/usage-state.json` | Where the node keeps its last counters and unsent batches, so a restart loses at most the last interval. |
 
 Every interval the node reads the kernel counters of each peer and posts the
 change since the previous batch. The request carries the `key` header with the
@@ -272,7 +272,21 @@ Content-Type: application/json
   sent to the client. Both are byte deltas since the previous batch.
 - Only peers with some traffic are listed. `peers` may be `[]`, which works as
   a heartbeat.
-- `allowed_ip` is the peer's first IPv4 allowed-ip without `/32`.
+- `allowed_ip` is the peer's first IPv4 allowed-ip without `/32` (an
+  IPv4-mapped address such as `::ffff:10.66.0.61` is sent as `10.66.0.61`).
+
+How the counting starts and restarts:
+
+- The first reading with no state file (or after the state was reset) only
+  records a baseline. Traffic from before it is not sent.
+- A peer that shows up after that is sent in full: its whole counter is new
+  traffic.
+- The state resets itself (the next reading is only a baseline) when the
+  WireGuard interface changed (other name or key) or when the last reading is
+  older than 30 minutes (or two intervals, if that is longer). Unsent batches
+  are kept.
+- A state file that is not valid JSON is moved to
+  `usage-state.json.corrupt-<unix time>` and counting starts from a baseline.
 
 The answer on success is `200` with:
 
@@ -282,11 +296,21 @@ The answer on success is `200` with:
 
 Delivery rules:
 
-- `200`: the batch is dropped and the limits are applied.
-- `404`, `429`, any `5xx`, a timeout or a network error: the batch is kept on
-  disk and sending stops until the next interval.
+- `200`: the batch is dropped and the limits are applied. If the body has
+  `"ok":false`, is not valid JSON or has no `limits` key, the batch is still
+  dropped, the current limits stay as they are, and a line is logged.
+- `404`, `429`, any `5xx`, any `3xx`, a timeout or a network error: the batch
+  is kept on disk and sending stops until the next interval. Redirects are
+  never followed.
 - Any other `4xx`: the batch is dropped and a line is logged, so a payload the
   server will never accept cannot block the queue.
+- At most 30 batches are sent per interval, oldest first; a backlog drains
+  over the next intervals.
+- At most 2000 unsent batches are kept. When there are more, the oldest are
+  dropped and a line is logged.
+- The node writes the state file once per interval, before sending. If it
+  cannot write it, it sends only a heartbeat (limits keep working) and keeps
+  the batches in memory until a write works.
 
 ### Speed limits
 
@@ -302,11 +326,17 @@ ip saddr 10.66.0.61 limit rate over 32000 bytes/second burst 64000 bytes drop
 ```
 
 The rate in bytes per second is `rate_kbps * 1000 / 8`, and the burst is twice
-that. Check it with:
+that. A `rate_kbps` of `0` or less means `256`; a value between `1` and `63` is
+raised to `64`, because a smaller burst than one packet would cut the client
+off instead of slowing it. Check the rules with:
 
 ```bash
 nft list table inet chop_fairuse
 ```
+
+Limits need the `nft` command (the `nftables` package). Without it the node
+still pushes usage and logs that `nft` failed. Each `nft` run is stopped after
+15 seconds.
 
 The node touches only this table. It never flushes the ruleset, never edits
 `/etc/nftables.conf` and never enables a service. Limits live in memory: after
@@ -317,6 +347,8 @@ a restart the table stays as it was until the next answer replaces it.
 1. Remove `USAGE_PUSH_URL` from `.env` (or leave it empty).
 2. Restart the API: `systemctl restart wireguard.service`.
 3. Delete the table if it is there: `nft delete table inet chop_fairuse`.
+4. Delete the state file (`USAGE_STATE_FILE`, by default
+   `/var/lib/wireguard-api/usage-state.json`).
 
 ## Build and test
 
