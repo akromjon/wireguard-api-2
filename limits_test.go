@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -107,6 +108,22 @@ func TestLimitUnknownPeerAndZeroRate(t *testing.T) {
 	got := buildLimitScript([]nodeLimit{{AllowedIP: "10.66.0.9", RateKbps: 0}}, nil)
 	if !strings.Contains(got, "ip daddr 10.66.0.9 limit rate over 32000 bytes/second burst 64000 bytes drop") {
 		t.Fatalf("script:\n%s", got)
+	}
+}
+
+func TestLimitRateFloor(t *testing.T) {
+	for _, c := range []struct {
+		kbps     int
+		bps, brs int
+	}{
+		{-5, 32000, 64000}, {0, 32000, 64000}, {1, 8000, 16000}, {63, 8000, 16000},
+		{64, 8000, 16000}, {100, 12500, 25000}, {256, 32000, 64000},
+	} {
+		got := buildLimitScript([]nodeLimit{{AllowedIP: "10.66.0.61", RateKbps: c.kbps}}, nil)
+		want := fmt.Sprintf("ip daddr 10.66.0.61 limit rate over %d bytes/second burst %d bytes drop", c.bps, c.brs)
+		if !strings.Contains(got, want) {
+			t.Fatalf("rate_kbps %d: want %q in:\n%s", c.kbps, want, got)
+		}
 	}
 }
 

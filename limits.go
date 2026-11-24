@@ -35,6 +35,19 @@ func limitRemoveScript() string {
 	return "table " + limitTable + "\ndelete table " + limitTable + "\n"
 }
 
+// limitRateKbps turns the master's rate into the one applied: no rate (<= 0)
+// means 256, and anything below 64 is raised to 64, since a burst smaller
+// than one packet would cut the user off instead of slowing them.
+func limitRateKbps(kbps int) int {
+	switch {
+	case kbps <= 0:
+		return 256
+	case kbps < 64:
+		return 64
+	}
+	return kbps
+}
+
 // buildLimitScript renders the whole table. Each limited IPv4 is mapped to its
 // peer and every allowed-ip of that peer is limited; a limit that matches no
 // peer is applied for that IPv4 alone. IPv4-mapped IPv6 addresses are written
@@ -51,10 +64,7 @@ func buildLimitScript(limits []nodeLimit, peers []peerReading) string {
 	b.WriteString(limitRemoveScript())
 	b.WriteString("table " + limitTable + " {\n  chain forward {\n    type filter hook forward priority -5; policy accept;\n")
 	for _, l := range sorted {
-		rate := l.RateKbps
-		if rate <= 0 {
-			rate = 256
-		}
+		rate := limitRateKbps(l.RateKbps)
 		bps := rate * 1000 / 8
 		want, _ := normIP(l.AllowedIP)
 		if want == "" {
