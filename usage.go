@@ -271,9 +271,6 @@ type usageAnswer struct {
 	Limits []nodeLimit `json:"limits"`
 }
 
-// applyLimits is replaced by the real nftables work later.
-func applyLimits(limits []nodeLimit) error { return nil }
-
 func newBatchID() string {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
