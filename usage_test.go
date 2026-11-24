@@ -370,6 +370,29 @@ func TestApplyCollectsBeforeSyncconf(t *testing.T) {
 	}
 }
 
+func TestApplyRunsWhenMeterShowFails(t *testing.T) {
+	env := setupUsage(t)
+	env.setDump(t, dumpPeer{"pubA", "10.66.0.61/32", 5000, 9000})
+	mustCollect(t)
+	env.addUser(t, "alice")
+	env.addUser(t, "bob")
+	if err := os.WriteFile(filepath.Join(env.dir, "status_fail"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	logs := captureLog(t)
+	before := env.syncconfCalls(t)
+	rec := env.authedRequest(t, http.MethodPost, "/api/users/delete", DeleteUserRequest{Name: "alice"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete: %d %s", rec.Code, rec.Body.String())
+	}
+	if env.syncconfCalls(t) != before+1 {
+		t.Fatalf("syncconf calls %d -> %d, want one more", before, env.syncconfCalls(t))
+	}
+	if !strings.Contains(logs.String(), "usage meter:") {
+		t.Fatalf("meter failure not logged: %q", logs.String())
+	}
+}
+
 func TestDisabledMeterDoesNothing(t *testing.T) {
 	env := setupUsage(t)
 	USAGE_PUSH_URL = ""
@@ -688,18 +711,23 @@ func TestAnswerWithEmptyLimitsRemovesAll(t *testing.T) {
 
 func TestPendingCappedAt2000(t *testing.T) {
 	setupUsage(t)
-	for i := 0; i <= 2000; i++ {
-		usageMu.Lock()
-		usageSt.Open = map[string]usageEntry{"pubA": {PublicKey: "pubA", AllowedIP: "10.66.0.61", RX: uint64(i + 1)}}
-		usageMu.Unlock()
-		sealOpenBatch(time.Now())
+	usageMu.Lock()
+	for i := 0; i < 2000; i++ {
+		usageSt.Pending = append(usageSt.Pending, usageBatch{BatchID: newBatchID(), SentAt: time.Now().UTC(),
+			Peers: []usageEntry{{PublicKey: "pubA", AllowedIP: "10.66.0.61", RX: uint64(i + 1)}}})
 	}
+	usageSt.Open = map[string]usageEntry{"pubA": {PublicKey: "pubA", AllowedIP: "10.66.0.61", RX: 2001}}
+	usageMu.Unlock()
+	sealOpenBatch(time.Now())
 	st := snapshot()
 	if len(st.Pending) != 2000 {
 		t.Fatalf("len = %d", len(st.Pending))
 	}
 	if st.Pending[0].Peers[0].RX != 2 {
 		t.Fatalf("oldest RX = %d, want 2 (first dropped)", st.Pending[0].Peers[0].RX)
+	}
+	if st.Pending[1999].Peers[0].RX != 2001 {
+		t.Fatalf("newest RX = %d, want 2001", st.Pending[1999].Peers[0].RX)
 	}
 	if len(st.Open) != 0 {
 		t.Fatalf("Open not cleared")
