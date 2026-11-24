@@ -617,9 +617,8 @@ func usageTick(now time.Time) {
 	sealOpenBatch(now)
 	limits, ok := pushPending(now)
 	if ok {
-		if err := applyLimits(limits); err != nil {
-			log.Printf("usage push: applying limits: %v", err)
-		}
+		// applyLimits logs each distinct nft error once; a repeat stays quiet.
+		_ = applyLimits(limits)
 	}
 }
 

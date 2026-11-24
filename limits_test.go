@@ -243,6 +243,23 @@ func TestHungNftIsKilled(t *testing.T) {
 	}
 }
 
+func TestNftErrorLoggedOnceAcrossTicks(t *testing.T) {
+	dir := setupNft(t)
+	setupUsage(t)
+	newFakeMaster(t, `{"ok":true,"limits":[{"allowed_ip":"10.66.0.61","rate_kbps":256}]}`, 200)
+	os.WriteFile(filepath.Join(dir, "nft_fail"), nil, 0600)
+	logs := captureLog(t)
+	for i := 0; i < 3; i++ {
+		usageTick(time.Now())
+	}
+	if s := nftScripts(t, dir); len(s) != 3 {
+		t.Fatalf("nft calls = %d, want a retry each tick", len(s))
+	}
+	if n := strings.Count(logs.String(), "fake nft failure"); n != 1 {
+		t.Fatalf("nft error logged %d times:\n%s", n, logs.String())
+	}
+}
+
 func TestOnlyOwnTableTouched(t *testing.T) {
 	dir := setupNft(t)
 	applyLimits([]nodeLimit{{AllowedIP: "10.66.0.61", RateKbps: 256}})
