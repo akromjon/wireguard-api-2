@@ -172,17 +172,49 @@ func counterDelta(cur, last uint64) uint64 {
 	return cur
 }
 
+// usageTempPrefix names the temp files of writeUsageStateFile. os.CreateTemp
+// appends only digits to it.
+const usageTempPrefix = ".usage-state-"
+
+// removeStaleUsageTemps deletes temp files a crash left next to the state
+// file. Only regular files named usageTempPrefix + digits are touched.
+func removeStaleUsageTemps() {
+	dir := filepath.Dir(USAGE_STATE_FILE)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		rest := strings.TrimPrefix(e.Name(), usageTempPrefix)
+		if rest == e.Name() || rest == "" || strings.Trim(rest, "0123456789") != "" || !e.Type().IsRegular() {
+			continue
+		}
+		if err := os.Remove(filepath.Join(dir, e.Name())); err == nil {
+			log.Printf("usage meter: removed leftover temp file %s", e.Name())
+		}
+	}
+}
+
 // loadUsageState reads the state file. A missing file is a fresh, unprimed
-// state; an unreadable one is an error. Caller holds usageMu (or is a test).
+// state; an unreadable one is an error. A file that is not valid JSON is
+// moved aside to <file>.corrupt-<unix time> and the meter starts unprimed.
+// Caller holds usageMu (or is a test).
 func loadUsageState() error {
 	st := newUsageState()
+	removeStaleUsageTemps()
 	data, err := os.ReadFile(USAGE_STATE_FILE)
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("reading usage state: %v", err)
 	}
 	if err == nil {
-		if err := json.Unmarshal(data, &st); err != nil {
-			return fmt.Errorf("parsing usage state: %v", err)
+		if jerr := json.Unmarshal(data, &st); jerr != nil {
+			st = newUsageState()
+			aside := fmt.Sprintf("%s.corrupt-%d", USAGE_STATE_FILE, time.Now().Unix())
+			if rerr := os.Rename(USAGE_STATE_FILE, aside); rerr != nil {
+				log.Printf("usage meter: state file is not valid JSON (%v) and could not be moved aside (%v); starting from a new baseline", jerr, rerr)
+			} else {
+				log.Printf("usage meter: state file is not valid JSON (%v); moved it to %s, starting from a new baseline", jerr, aside)
+			}
 		}
 		if st.Last == nil {
 			st.Last = map[string]peerCounter{}
@@ -262,7 +294,7 @@ func writeUsageStateFile(st usageState) error {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(dir, ".usage-state-*")
+	tmp, err := os.CreateTemp(dir, usageTempPrefix+"*")
 	if err != nil {
 		return err
 	}

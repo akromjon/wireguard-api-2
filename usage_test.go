@@ -761,6 +761,62 @@ func TestSaveFailureThenRestartCountsOnce(t *testing.T) {
 	}
 }
 
+func TestCorruptStateFileMovedAside(t *testing.T) {
+	env := setupUsage(t)
+	if err := os.WriteFile(USAGE_STATE_FILE, []byte("{garbage"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	env.setDump(t, dumpPeer{"pubA", "10.66.0.61/32", 5000, 9000})
+	mustCollect(t)
+	st := snapshot()
+	if !st.Primed || len(st.Open) != 0 || st.Last["pubA"] != (peerCounter{5000, 9000}) {
+		t.Fatalf("state = %+v, want a fresh baseline", st)
+	}
+	aside, _ := filepath.Glob(USAGE_STATE_FILE + ".corrupt-*")
+	if len(aside) != 1 {
+		t.Fatalf("moved-aside files = %v", aside)
+	}
+	if data, _ := os.ReadFile(aside[0]); string(data) != "{garbage" {
+		t.Fatalf("moved-aside content = %q", data)
+	}
+	env.setDump(t, dumpPeer{"pubA", "10.66.0.61/32", 5500, 9000})
+	mustCollect(t)
+	if got := snapshot().Open["pubA"].RX; got != 500 {
+		t.Fatalf("Open[pubA].RX = %d, want 500", got)
+	}
+	mustSave(t)
+	resetUsageMemory()
+	usageMu.Lock()
+	err := loadUsageState()
+	usageMu.Unlock()
+	if err != nil || snapshot().Open["pubA"].RX != 500 {
+		t.Fatalf("reload after heal: err=%v state=%+v", err, snapshot())
+	}
+}
+
+func TestStaleTempFilesRemovedOnLoad(t *testing.T) {
+	env := setupUsage(t)
+	dir := filepath.Dir(USAGE_STATE_FILE)
+	for _, name := range []string{".usage-state-123456", ".usage-state-notdigits", ".usage-state-", "keep.json"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Mkdir(filepath.Join(dir, ".usage-state-999"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	env.setDump(t, dumpPeer{"pubA", "10.66.0.61/32", 1, 1})
+	mustCollect(t)
+	if _, err := os.Stat(filepath.Join(dir, ".usage-state-123456")); !os.IsNotExist(err) {
+		t.Fatalf("leftover temp file still there (err=%v)", err)
+	}
+	for _, name := range []string{".usage-state-notdigits", ".usage-state-", "keep.json", ".usage-state-999"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Fatalf("%s removed: %v", name, err)
+		}
+	}
+}
+
 func TestPendingSurvivesRestart(t *testing.T) {
 	env := setupUsage(t)
 	m := newFakeMaster(t, "", 503)
