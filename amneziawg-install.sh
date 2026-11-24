@@ -53,6 +53,32 @@ noninteractive_enabled() {
 
 # Seed a variable with a default ONLY in headless mode, and only when unset/empty.
 # In interactive mode this is a no-op so the existing until/read prompt runs.
+# is_private_ipv4 IP: true for RFC1918, CGNAT (100.64/10) and link-local.
+is_private_ipv4() {
+	local ip=$1 a b
+	[[ ${ip} =~ ^([0-9]+)\.([0-9]+)\.[0-9]+\.[0-9]+$ ]] || return 1
+	a=${BASH_REMATCH[1]}
+	b=${BASH_REMATCH[2]}
+	((a == 10)) && return 0
+	((a == 172 && b >= 16 && b <= 31)) && return 0
+	((a == 192 && b == 168)) && return 0
+	((a == 100 && b >= 64 && b <= 127)) && return 0
+	((a == 169 && b == 254)) && return 0
+	return 1
+}
+
+# pick_public_ip NIC_IP LOOKUP: the endpoint IP to write into client configs.
+# A private NIC IP is replaced by LOOKUP when LOOKUP is a plain IPv4 address.
+pick_public_ip() {
+	local nic_ip=$1 lookup=$2
+	if [[ -n ${nic_ip} ]] && is_private_ipv4 "${nic_ip}" &&
+		[[ ${lookup} =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+		echo "${lookup}"
+		return
+	fi
+	echo "${nic_ip}"
+}
+
 ni_default() {
 	local __name=$1 __default=$2
 	noninteractive_enabled || return 0
@@ -896,6 +922,11 @@ function installQuestions() {
 	# caller already exported one (non-interactive install).
 	if [[ -z ${SERVER_PUB_IP:-} ]]; then
 		SERVER_PUB_IP=$(ip -4 addr | sed -ne 's|^.* inet \([^/]*\)/.* scope global.*$|\1|p' | awk '{print $1}' | head -1)
+		# Behind a 1:1 NAT the NIC only has a private address; clients need
+		# the public one or every direct (non-relay) connect fails.
+		if is_private_ipv4 "${SERVER_PUB_IP}"; then
+			SERVER_PUB_IP=$(pick_public_ip "${SERVER_PUB_IP}" "$(curl -fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)")
+		fi
 		if [[ -z ${SERVER_PUB_IP} ]]; then
 			# Detect public IPv6 address
 			SERVER_PUB_IP=$(ip -6 addr | sed -ne 's|^.* inet6 \([^/]*\)/.* scope global.*$|\1|p' | head -1)

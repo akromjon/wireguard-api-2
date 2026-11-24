@@ -681,4 +681,27 @@ assert_ni_default_precedes_read \
 grep -q '^ECHO_ENABLED=1$' "${SCRIPT_DIR}/.env.example" ||
 	fail ".env.example must carry ECHO_ENABLED=1"
 
+# NAT boxes (any 1:1-NAT cloud): the NIC only carries a private
+# address. Client configs must get the public IP, never the private one.
+is_private_ipv4 "192.168.0.2" || fail "192.168.0.2 must be private"
+is_private_ipv4 "10.1.2.3" || fail "10.1.2.3 must be private"
+is_private_ipv4 "172.16.0.1" || fail "172.16.0.1 must be private"
+is_private_ipv4 "172.31.255.1" || fail "172.31.255.1 must be private"
+is_private_ipv4 "100.64.0.1" || fail "100.64.0.1 (CGNAT) must be private"
+is_private_ipv4 "169.254.1.1" || fail "169.254.1.1 must be private"
+if is_private_ipv4 "203.0.113.10"; then fail "203.0.113.10 must be public"; fi
+if is_private_ipv4 "172.32.0.1"; then fail "172.32.0.1 must be public"; fi
+if is_private_ipv4 "100.128.0.1"; then fail "100.128.0.1 must be public"; fi
+
+[[ $(pick_public_ip "192.168.0.2" "203.0.113.10") == "203.0.113.10" ]] ||
+	fail "private NIC IP must be replaced by the detected public IP"
+[[ $(pick_public_ip "51.255.43.118" "1.2.3.4") == "51.255.43.118" ]] ||
+	fail "a public NIC IP must be kept as is"
+[[ $(pick_public_ip "192.168.0.2" "") == "192.168.0.2" ]] ||
+	fail "with no detected public IP, fall back to the NIC IP"
+[[ $(pick_public_ip "192.168.0.2" "<html>error") == "192.168.0.2" ]] ||
+	fail "a non-IPv4 lookup answer must be ignored"
+[[ $(pick_public_ip "" "203.0.113.10") == "" ]] ||
+	fail "no IPv4 on the NIC: leave it empty so the IPv6 fallback runs"
+
 echo "installer parameter and coexistence tests passed"
