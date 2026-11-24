@@ -55,7 +55,15 @@ func resetUsageMemory() {
 	defer usageMu.Unlock()
 	usageSt = newUsageState()
 	usageLoaded = false
+	usageGen, usageSavedGen, usageSaveFailed = 0, 0, false
 	lastPeers = nil
+}
+
+func mustSave(t *testing.T) {
+	t.Helper()
+	if err := saveUsageState(); err != nil {
+		t.Fatalf("saveUsageState: %v", err)
+	}
 }
 
 func (e *testEnv) setDump(t *testing.T, peers ...dumpPeer) {
@@ -369,6 +377,7 @@ func TestStateSurvivesReload(t *testing.T) {
 	mustCollect(t)
 	env.setDump(t, dumpPeer{"pubA", "10.66.0.61/32", 6500, 9100})
 	mustCollect(t)
+	mustSave(t)
 	before := snapshot()
 
 	resetUsageMemory()
@@ -639,6 +648,116 @@ func TestPendingCappedAt2000(t *testing.T) {
 	}
 	if len(st.Open) != 0 {
 		t.Fatalf("Open not cleared")
+	}
+}
+
+func TestCollectAndSealDoNotWriteState(t *testing.T) {
+	env := setupUsage(t)
+	env.addUser(t, "alice")
+	env.addUser(t, "bob")
+	env.setDump(t, dumpPeer{"pubA", "10.66.0.61/32", 5000, 9000})
+	mustCollect(t)
+	env.setDump(t, dumpPeer{"pubA", "10.66.0.61/32", 6000, 9000})
+	// The apply path (under wgConfigMutex) collects too.
+	if rec := env.authedRequest(t, http.MethodPost, "/api/users/delete", DeleteUserRequest{Name: "alice"}); rec.Code != http.StatusOK {
+		t.Fatalf("delete: %d %s", rec.Code, rec.Body.String())
+	}
+	sealOpenBatch(time.Now())
+	if _, err := os.Stat(USAGE_STATE_FILE); !os.IsNotExist(err) {
+		t.Fatalf("state file written outside the push loop (err=%v)", err)
+	}
+	if len(pendingIDs()) != 1 {
+		t.Fatalf("Pending = %v", pendingIDs())
+	}
+	mustSave(t)
+	if _, err := os.Stat(USAGE_STATE_FILE); err != nil {
+		t.Fatalf("state file after save: %v", err)
+	}
+}
+
+// lockDir makes dir unwritable; it skips the test when that has no effect
+// (running as root).
+func lockDir(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.Chmod(dir, 0500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0700) })
+	probe := filepath.Join(dir, "probe")
+	if err := os.WriteFile(probe, nil, 0600); err == nil {
+		os.Remove(probe)
+		t.Skip("directory permissions are not enforced (root?)")
+	}
+}
+
+func sentRX(m *fakeMaster) (total uint64, dataPosts int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, b := range m.bodies {
+		if len(b.Peers) > 0 {
+			dataPosts++
+		}
+		for _, p := range b.Peers {
+			total += p.RX
+		}
+	}
+	return total, dataPosts
+}
+
+func TestUnsavedStateSendsOnlyHeartbeat(t *testing.T) {
+	env := setupUsage(t)
+	m := newFakeMaster(t, `{"ok":true,"limits":[]}`, 200)
+	sub := filepath.Join(env.dir, "st")
+	if err := os.MkdirAll(sub, 0700); err != nil {
+		t.Fatal(err)
+	}
+	USAGE_STATE_FILE = filepath.Join(sub, "state.json")
+	env.setDump(t, dumpPeer{"pubA", "10.66.0.61/32", 1000, 0})
+	usageTick(time.Now()) // baseline, saved, heartbeat
+
+	lockDir(t, sub)
+	env.setDump(t, dumpPeer{"pubA", "10.66.0.61/32", 5000, 0})
+	usageTick(time.Now())
+	if m.count() != 2 || len(m.bodies[1].Peers) != 0 {
+		t.Fatalf("with an unwritable state dir: requests=%d bodies=%+v, want a heartbeat only", m.count(), m.bodies)
+	}
+	if len(pendingIDs()) != 1 {
+		t.Fatalf("outbox must stay in memory: %v", pendingIDs())
+	}
+
+	os.Chmod(sub, 0700)
+	usageTick(time.Now())
+	usageTick(time.Now())
+	total, posts := sentRX(m)
+	if total != 4000 || posts != 1 {
+		t.Fatalf("master got rx %d in %d data posts, want 4000 in 1", total, posts)
+	}
+	if len(pendingIDs()) != 0 {
+		t.Fatalf("Pending = %v", pendingIDs())
+	}
+}
+
+func TestSaveFailureThenRestartCountsOnce(t *testing.T) {
+	env := setupUsage(t)
+	m := newFakeMaster(t, `{"ok":true,"limits":[]}`, 200)
+	sub := filepath.Join(env.dir, "st")
+	if err := os.MkdirAll(sub, 0700); err != nil {
+		t.Fatal(err)
+	}
+	USAGE_STATE_FILE = filepath.Join(sub, "state.json")
+	env.setDump(t, dumpPeer{"pubA", "10.66.0.61/32", 1000, 0})
+	usageTick(time.Now()) // on disk: Last = 1000
+
+	lockDir(t, sub)
+	env.setDump(t, dumpPeer{"pubA", "10.66.0.61/32", 5000, 0})
+	usageTick(time.Now()) // cannot save: nothing but a heartbeat goes out
+
+	os.Chmod(sub, 0700)
+	resetUsageMemory() // API restart
+	env.setDump(t, dumpPeer{"pubA", "10.66.0.61/32", 5100, 0})
+	usageTick(time.Now())
+	if total, _ := sentRX(m); total != 4100 {
+		t.Fatalf("real traffic 4100, master got %d", total)
 	}
 }
 

@@ -24,7 +24,16 @@ import (
 // Usage meter: reads per-peer byte counters from the kernel and keeps the
 // deltas since the last read. Counters live in the kernel and vanish when a
 // peer is removed, so the meter must run right before every apply.
-// Lock order: wgConfigMutex -> usageMu, never the other way.
+//
+// Collects and seals change memory only. The push loop writes the state to
+// disk once per tick, before sending, and sends batches only when that write
+// worked: a batch sent but not on disk would be counted again after a
+// restart, from the older counters on disk. A crash loses at most the
+// changes since the last write (an under-count).
+//
+// Lock order: wgConfigMutex -> usageMu, never the other way. usageSaveMu is
+// taken only by the push loop, before usageMu and never under it or under
+// wgConfigMutex. No HTTP, nft or state-file write runs under usageMu.
 
 var (
 	// USAGE_PUSH_URL turns the feature on; empty means off.
@@ -35,8 +44,17 @@ var (
 	usageMu     sync.Mutex
 	usageSt     usageState
 	usageLoaded bool
+	// usageGen counts changes to usageSt; usageSavedGen is the count the
+	// state file holds. They differ while memory has unsaved changes.
+	usageGen, usageSavedGen uint64
+	// usageSaveFailed is true when the last write of the state file failed.
+	usageSaveFailed bool
 	// lastPeers is the peer list of the latest successful collect.
 	lastPeers []peerReading
+
+	// usageSaveMu serializes state-file writes so an older copy never lands
+	// after a newer one.
+	usageSaveMu sync.Mutex
 )
 
 type usageEntry struct {
@@ -175,12 +193,68 @@ func loadUsageState() error {
 	}
 	usageSt = st
 	usageLoaded = true
+	usageGen, usageSavedGen, usageSaveFailed = 0, 0, false
 	return nil
 }
 
-// saveUsageState writes the state atomically (temp file + rename).
+// markUsageChangedLocked records an unsaved change. Caller holds usageMu.
+func markUsageChangedLocked() { usageGen++ }
+
+// saveUsageState writes the state to disk when it changed since the last
+// write or the last write failed. It copies the state under usageMu and
+// writes without it. Only the push loop calls it; it never runs under
+// wgConfigMutex. Nothing is written before the state was loaded, so an
+// unreadable file is never replaced by an empty state.
 func saveUsageState() error {
-	data, err := json.Marshal(usageSt)
+	usageSaveMu.Lock()
+	defer usageSaveMu.Unlock()
+
+	usageMu.Lock()
+	if !usageLoaded || (usageGen == usageSavedGen && !usageSaveFailed) {
+		usageMu.Unlock()
+		return nil
+	}
+	snap := usageState{
+		Primed:      usageSt.Primed,
+		Iface:       usageSt.Iface,
+		CollectedAt: usageSt.CollectedAt,
+		Last:        make(map[string]peerCounter, len(usageSt.Last)),
+		Open:        make(map[string]usageEntry, len(usageSt.Open)),
+		Pending:     append([]usageBatch(nil), usageSt.Pending...),
+	}
+	for k, v := range usageSt.Last {
+		snap.Last[k] = v
+	}
+	for k, v := range usageSt.Open {
+		snap.Open[k] = v
+	}
+	gen := usageGen
+	wasFailing := usageSaveFailed
+	usageMu.Unlock()
+
+	err := writeUsageStateFile(snap)
+
+	usageMu.Lock()
+	if err == nil {
+		usageSavedGen = gen
+		usageSaveFailed = false
+	} else {
+		usageSaveFailed = true
+	}
+	usageMu.Unlock()
+
+	switch {
+	case err != nil && !wasFailing:
+		log.Printf("usage push: cannot save state, sending only heartbeats until it can: %v", err)
+	case err == nil && wasFailing:
+		log.Printf("usage push: state saved again")
+	}
+	return err
+}
+
+// writeUsageStateFile writes st atomically (temp file + fsync + rename).
+func writeUsageStateFile(st usageState) error {
+	data, err := json.Marshal(st)
 	if err != nil {
 		return err
 	}
@@ -218,8 +292,8 @@ func saveUsageState() error {
 	return nil
 }
 
-// collectUsage folds the kernel counters into the open deltas and saves the
-// state. It takes usageMu only, never wgConfigMutex. No-op when disabled.
+// collectUsage folds the kernel counters into the open deltas, in memory
+// only. It takes usageMu only, never wgConfigMutex. No-op when disabled.
 func collectUsage() error {
 	if !usageEnabled() {
 		return nil
@@ -286,8 +360,8 @@ func collectUsage() error {
 	usageSt.Iface = iface
 	usageSt.CollectedAt = now
 	lastPeers = peers
-
-	return saveUsageState()
+	markUsageChangedLocked()
+	return nil
 }
 
 // collectUsageLogged is for call sites that must never be blocked by the meter.
@@ -324,7 +398,7 @@ func newBatchID() string {
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
-// sealOpenBatch moves the open deltas into a new pending batch and saves.
+// sealOpenBatch moves the open deltas into a new pending batch, in memory.
 // Does nothing when there is nothing open.
 func sealOpenBatch(now time.Time) {
 	usageMu.Lock()
@@ -347,9 +421,7 @@ func sealOpenBatch(now time.Time) {
 		usageSt.Pending = append([]usageBatch(nil), usageSt.Pending[over:]...)
 		log.Printf("usage push: outbox full, dropped %d oldest batches", over)
 	}
-	if err := saveUsageState(); err != nil {
-		log.Printf("usage push: saving state: %v", err)
-	}
+	markUsageChangedLocked()
 }
 
 func usageURLHost() string {
@@ -400,13 +472,18 @@ func sendBatch(b usageBatch) (int, *usageAnswer) {
 	return resp.StatusCode, &ans
 }
 
-// pushPending sends the outbox oldest-first, one request per batch. It never
-// holds usageMu during HTTP. limits/ok come from the last 200 answer that
-// decoded; ok=false leaves the limits unchanged.
+// pushPending saves the state, then sends the outbox oldest-first, one
+// request per batch. When the save fails it sends only a heartbeat and keeps
+// the outbox in memory. It never holds usageMu during HTTP. limits/ok come
+// from the last 200 answer that decoded; ok=false leaves the limits unchanged.
 func pushPending(now time.Time) (limits []nodeLimit, ok bool) {
-	usageMu.Lock()
-	batches := append([]usageBatch(nil), usageSt.Pending...)
-	usageMu.Unlock()
+	var batches []usageBatch
+	if saveUsageState() == nil {
+		// Only the push loop changes Pending, so this is what was saved.
+		usageMu.Lock()
+		batches = append([]usageBatch(nil), usageSt.Pending...)
+		usageMu.Unlock()
+	}
 
 	stored := true
 	if len(batches) == 0 {
@@ -437,6 +514,8 @@ func pushPending(now time.Time) (limits []nodeLimit, ok bool) {
 	}
 
 	if stored && len(done) > 0 {
+		// Saved with the next tick. A crash before that re-sends these
+		// batch_ids, which the master counts once.
 		usageMu.Lock()
 		kept := usageSt.Pending[:0:0]
 		for _, b := range usageSt.Pending {
@@ -445,9 +524,7 @@ func pushPending(now time.Time) (limits []nodeLimit, ok bool) {
 			}
 		}
 		usageSt.Pending = kept
-		if err := saveUsageState(); err != nil {
-			log.Printf("usage push: saving state: %v", err)
-		}
+		markUsageChangedLocked()
 		usageMu.Unlock()
 	}
 	return limits, ok
