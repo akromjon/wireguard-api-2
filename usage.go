@@ -551,8 +551,9 @@ func sendBatch(b usageBatch) (int, *usageAnswer) {
 
 // pushPending saves the state, then sends the outbox oldest-first, one
 // request per batch, at most maxSendsPerTick. When the save fails it sends
-// only a heartbeat and keeps the outbox in memory. It never holds usageMu during HTTP. limits/ok come
-// from the last 200 answer that decoded; ok=false leaves the limits unchanged.
+// only a heartbeat and keeps the outbox in memory. It never holds usageMu
+// during HTTP. limits/ok come from the last 200 answer that carried limits;
+// ok=false leaves the limits unchanged.
 func pushPending(now time.Time) (limits []nodeLimit, ok bool) {
 	var batches []usageBatch
 	if saveUsageState() == nil {
